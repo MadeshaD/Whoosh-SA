@@ -167,7 +167,13 @@ void motionBlur(float strength,uintptr_t car) {
     call<void>(0x700E00);
 }
 
-struct Lamp {Vec centre{},wake{};float radius{};DWORD sampleTime{};};
+struct Lamp {
+    Vec centre{};
+    std::array<Vec,2> steps{}; // Displacements toward older samples at 60 Hz.
+    unsigned count{};
+    float radius{};
+    DWORD sampleTime{};
+};
 std::array<Lamp,2> tracks;
 // XenonEffects contrail -> fuelcell_emitter 1875e3d5 -> emitteruv 9ccc9411.
 struct WindParticle {
@@ -251,10 +257,16 @@ void updateTrails(uintptr_t car,float speed,bool nitro,DWORD now) {
         const Vec point=centre-y*.055f;
         const auto elapsed=now-t.sampleTime;
         if(t.radius && !elapsed) continue;
-        Vec wake=read<Vec>(car+0x44)*(-50.f/60.f);
-        if(t.radius && elapsed<=100 && length(t.centre-point)<10.f)
-            wake=(t.centre-point)*(1000.f/(60.f*elapsed));
-        t={point,wake,.18f,now};
+        if(!t.radius || elapsed>100 || length(t.centre-point)>=10.f) {
+            t={};
+        } else {
+            t.steps[1]=t.steps[0];
+            t.steps[0]=(t.centre-point)*(1000.f/(60.f*elapsed));
+            t.count=std::min(2u,t.count+1);
+        }
+        t.centre=point;
+        t.sampleTime=now;
+        t.radius=.18f;
 
     }
 }
@@ -272,19 +284,31 @@ void drawLamps(uintptr_t set) {
     auto m=call<uintptr_t>(0x7F0990,frame);
     if(!m)return;
     Vec right=read<Vec>(m),up=read<Vec>(m+16);
-    std::array<Vertex,2*10*6> quads{};
+    std::array<Vertex,2*(1+3*8)*6> quads{};
     unsigned n=0;
     for(const auto& lamp:tracks) {
         if(!lamp.radius)continue;
-        // Overlap soft, camera-facing discs along a short wake. The far end goes to zero.
-        for(int j=9;j>=0;--j) {
-            float t=j/9.f,fade=(1.f-t)*(1.f-t);
-            Vec c=lamp.centre+lamp.wake*t;
-            Vec w=right*(lamp.radius*(1.5f+.55f*t)),h=up*(lamp.radius*(1.f+.65f*t));
-            uint32_t color=(uint32_t(j==0?175:65*fade)<<24)|(j==0?0xff6632u:0xff1610u);
-            Vertex a{c-w+h,{},color,0,0},b{c+w+h,{},color,1,0};
-            Vertex d{c-w-h,{},color,0,1},e{c+w-h,{},color,1,1};
-            for(auto v:{a,b,d,b,e,d})quads[n++]=v;
+        auto flare=[&](Vec c,uint32_t color) {
+            const Vec w=right*(lamp.radius*1.5f), h=up*lamp.radius;
+            Vertex a{c-w+h,{},color,0,0}, b{c+w+h,{},color,1,0};
+            Vertex d{c-w-h,{},color,0,1}, e{c+w-h,{},color,1,1};
+            for(auto vertex:{a,b,d,b,e,d}) quads[n++]=vertex;
+        };
+        flare(lamp.centre,0xffff6632u);
+        if(!lamp.count) continue;
+        // MW 0x744FD0 / Carbon 0x7CCCD0: successive pairs in the circular
+        // position history, eight interpolated flare submissions per pair.
+        const Vec older=lamp.centre+lamp.steps[0];
+        const Vec points[]={lamp.centre,older,older+lamp.steps[1]};
+        const unsigned count=lamp.count+1;
+        for(unsigned k=0;k<count;++k) {
+            const unsigned next=(k+1)%count;
+            for(unsigned j=1;j<=8;++j) {
+                const float f=j/8.f;
+                const float age=(k+(float(next)-k)*f)/lamp.count;
+                const unsigned alpha=unsigned((97.5f/count)*(1.f-age)*(1.f-age));
+                flare(points[k]+(points[next]-points[k])*f,(alpha<<24)|0xff1610u);
+            }
         }
     }
     call<int>(set,1,raster);

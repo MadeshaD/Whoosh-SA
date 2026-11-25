@@ -46,7 +46,7 @@ struct Input {
     bool braking{}, grounded{}, nitro{}, handbrake{}, hittingWorld{}, contact{}, manualLook{};
 };
 struct Response {
-    float lag{}, height{}, eye{}, target{}, targetHeight{}, hudScale{1};
+    float nitroFov{}, lag{}, height{}, eye{}, target{}, targetHeight{}, hudScale{1};
     Vec tilt{}, shake{}, viewFront{};
     std::array<float,4> vibration{}; // view translation X/Y in m, pitch/yaw in radians
 };
@@ -55,7 +55,7 @@ class Controller {
         float value{}, slope{}, next{};
         float advance(float goal, float duration, float dt);
     };
-    Cubic eye, target, targetHeight, tiltX, tiltY, headingX, headingY, headingZ;
+    Cubic nitroFov, eye, target, targetHeight, tiltX, tiltY, headingX, headingY, headingZ;
     Profile lastProfile{};
     unsigned lastZoom{};
     bool started{}, freeOrbit{};
@@ -103,8 +103,9 @@ template<class Accept> bool liftLowEye(Vec pivot,Vec requested,float minimumSetb
     }
     return false;
 }
-struct Placement { Vec anchor{}, eye{}, look{}, up{}; };
-Placement place(const Pose& native, const Vehicle& car, const Response& response, bool bumper);
+struct Placement { Vec anchor{}, eye{}, look{}, up{}; bool keepBearing{}; };
+struct RoofOptions { bool enabled{}; float height{}, distance{}, pitchDegrees{}; };
+Placement place(const Pose& native, const Vehicle& car, const Response& response, bool bumper, RoofOptions roof={});
 Pose orient(const Placement& p, Vec clippedEye);
 Vec cross(Vec a, Vec b);
 template<class Cast> Vec limitTravel(Vec from, Vec to, float clearance, Cast cast) {

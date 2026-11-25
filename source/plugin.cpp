@@ -119,7 +119,11 @@ void reload() {
         {option(L"Camera",L"CameraBoats",1,0,1)!=0, option(L"Camera",L"CameraMotorcycles",1,0,1)!=0,
         option(L"Camera",L"CameraPlanes",1,0,1)!=0, option(L"Camera",L"CameraHelicopters",1,0,1)!=0,
          option(L"Camera",L"CameraTrains",0,0,1)!=0}, option(L"Camera",L"CameraReturnTimeout",1,0,10),
-        option(L"Camera",L"CameraReturnSpeed",2,.5f,5),hudShake);
+        option(L"Camera",L"CameraReturnSpeed",2,.5f,5),hudShake,
+        {option(L"Camera",L"CameraRoofAnchor",0,0,1)!=0,
+         option(L"Camera",L"CameraRoofHeight",0,-5,10),
+         option(L"Camera",L"CameraRoofDistance",0,-5,20),
+         option(L"Camera",L"CameraRoofPitch",0,-45,45)});
     Settings cfg;
     cfg.minimumKmh=option(L"Whoosh",L"MinSpeedKmh",cfg.minimumKmh,5,300);
     cfg.fullKmh=std::max(cfg.minimumKmh+1,option(L"Whoosh",L"FullVolumeSpeedKmh",cfg.fullKmh,6,500));
@@ -143,7 +147,7 @@ void reload() {
         static bool started=false;
         if(FILE* file=_wfopen((directory+L"\\Whoosh.SA.log").c_str(),started?L"ab":L"wb")) {
             started=true;
-            std::fprintf(file,"Whoosh.SA 0.28 settings: Enabled=%d ReloadKey=%d CameraProfile=%d HUDShake=%d MotionBlur=%d Strength=%.0f WindTrails=%d Opacity=%.0f NitroLights=%d StreakFlares=%d WindAudio=%d Volume=%.0f PassDistance=%.1f RoofHeight=%.1f\n",
+            std::fprintf(file,"Whoosh.SA 0.31 settings: Enabled=%d ReloadKey=%d CameraProfile=%d HUDShake=%d MotionBlur=%d Strength=%.0f WindTrails=%d Opacity=%.0f NitroLights=%d StreakFlares=%d WindAudio=%d Volume=%.0f PassDistance=%.1f RoofHeight=%.1f\n",
                 enabled,reloadKey,profile,hudShake,fx.blur,fx.strength*100,fx.wind,fx.windOpacity*100,fx.lights,fx.flares,windEnabled,settingGain*100,cfg.passMetres,cfg.roofMetres);
             std::fclose(file);
         }

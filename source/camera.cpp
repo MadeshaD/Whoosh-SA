@@ -143,7 +143,10 @@ Response Controller::step(const Input& in) {
     }
     const bool first=!started || in.profile!=lastProfile || in.zoom!=lastZoom;
     if(first) {
+        const auto previousNitro=nitroFov;
+        const bool chaseSwitch=started && lastZoom && in.zoom;
         *this={};
+        if(chaseSwitch) nitroFov=previousNitro;
         started=true;
         lastProfile=in.profile;
         lastZoom=in.zoom;
@@ -166,6 +169,10 @@ Response Controller::step(const Input& in) {
     if((int(phase*11.74265f)&1)==0) out.shake=shakeDirection*envelope(phase);
 
     const float speed=length(in.velocity);
+    // Both PC movers add 0x0666 binary-angle units to the moving chase POV.
+    constexpr float nosAngle=0x0666 * (360.f/65536.f);
+    out.nitroFov=nitroFov.advance(in.zoom && in.nitro && speed>0 ? nosAngle : 0.f,
+                                 mix(1.f,.5f,unitRange(speed/71.f)),in.dt);
     roadClock+=in.dt;
     const float roadLevel=roadVibration(in,roadClock,speed,dot(accel,in.forward),out);
     if(in.profile==Profile::Carbon) {
@@ -284,7 +291,7 @@ Response Controller::step(const Input& in) {
     return out;
 }
 
-Placement place(const Pose& native, const Vehicle& car, const Response& r, bool bumper) {
+Placement place(const Pose& native, const Vehicle& car, const Response& r, bool bumper, RoofOptions roof) {
     const Vec stockFront=normalized(native.front,{0,1,0});
     const Vec front=bumper ? stockFront : normalized(r.viewFront,stockFront);
     const Vec up=bumper ? normalized(native.up,{0,0,1}) : Vec{0,0,1};
@@ -294,6 +301,19 @@ Placement place(const Pose& native, const Vehicle& car, const Response& r, bool 
         p.anchor=native.position;
         p.eye=p.anchor;
         p.look=p.eye+front+up*r.targetHeight;
+    } else if(roof.enabled) {
+        p.anchor=car.centre+car.up*std::max(r.height,car.roof+.10f);
+        const float reach=-r.lag+std::max(0.f,car.rearExtent+.75f-4.7f);
+        p.eye=p.anchor-front*std::max(.25f,reach+roof.distance-r.eye)+up*roof.height;
+        p.look=p.anchor+car.forward*r.target+car.up*r.targetHeight+up*roof.height;
+        p.keepBearing=true;
+        if(roof.pitchDegrees!=0) {
+            const Vec sight=p.look-p.eye;
+            const Vec aim=normalized(sight,front);
+            constexpr float radians=.01745329252f;
+            const float pitch=std::clamp(pitchOf(aim)+roof.pitchDegrees*radians,-89.f*radians,89.f*radians);
+            p.look=p.eye+fromAngles(yawOf(aim),pitch)*length(sight);
+        }
     } else {
         // The stock camera already accounts for the model, zoom and obstructions.
         // Pivot on its sightline so an aligned, stationary view exactly reproduces GTA.
@@ -319,7 +339,7 @@ Placement place(const Pose& native, const Vehicle& car, const Response& r, bool 
     return p;
 }
 Pose orient(const Placement& p, Vec clippedEye) {
-    Vec forward=normalized(p.look-clippedEye,normalized(p.look-p.eye,{0,1,0}));
+    Vec forward=normalized(p.look-(p.keepBearing ? p.eye : clippedEye),normalized(p.look-p.eye,{0,1,0}));
     Vec right=normalized(cross(forward,p.up),normalized(cross(forward,{0,0,1}),{1,0,0}));
     return {clippedEye,forward,normalized(cross(right,forward),{0,0,1})};
 }
