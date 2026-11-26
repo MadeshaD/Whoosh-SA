@@ -316,11 +316,16 @@ Placement place(const Pose& native, const Vehicle& car, const Response& r, bool 
         }
     } else {
         // The stock camera already accounts for the model, zoom and obstructions.
-        // Pivot on its sightline so an aligned, stationary view exactly reproduces GTA.
-        const float reach=std::max(.05f,dot(car.centre-native.position,stockFront));
-        p.anchor=native.position+stockFront*reach;
-        p.eye=p.anchor-front*reach+front*r.eye;
-        p.look=p.anchor+car.forward*r.target+car.up*r.targetHeight;
+        // Rotate the entire stock offset around the vehicle, including its off-axis component.
+        const Vec offset=native.position-car.centre;
+        const Vec stockRight=normalized(cross(stockFront,up),right);
+        const Vec rotatedOffset=right*dot(offset,stockRight)
+            +cross(right,front)*dot(offset,cross(stockRight,stockFront))
+            +front*dot(offset,stockFront);
+        p.anchor=car.centre;
+        p.eye=p.anchor+rotatedOffset+front*r.eye;
+        const float reach=std::max(.25f,-dot(offset,stockFront));
+        p.look=p.anchor+rotatedOffset+front*reach+car.forward*r.target+car.up*r.targetHeight;
     }
     p.up=up+r.tilt;
     // Apply the shaker in view space, then convert the view translation back

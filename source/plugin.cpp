@@ -41,6 +41,30 @@ void reportStatus() {
     }
 }
 int reloadKey=VK_F9;
+bool useNitrousAudio=true, nitrousHooks{};
+uintptr_t replacementOwner{};
+using Ignition=void(__thiscall*)(uintptr_t,int,float);
+using GasLoop=void(__thiscall*)(uintptr_t,int,int,int,int,float,float,float);
+void __fastcall ignition(uintptr_t entity,void*,int event,float volume) {
+    const auto car=entity-0x138;
+    if(nitrousHooks && enabled && useNitrousAudio && settingGain>0 && audio::nitrousReady() &&
+       gameplay() && nitroVehicle(car) && car==reinterpret_cast<FindVehicle>(0x56e0d0)(-1,false) &&
+       read<uintptr_t>(car+0x460)==reinterpret_cast<FindPed>(0x56e210)(-1)) {
+        replacementOwner=car;
+        return;
+    }
+    if(replacementOwner==car)replacementOwner=0;
+    reinterpret_cast<Ignition>(0x4f6420)(entity,event,volume);
+}
+void __fastcall nitroLoop(uintptr_t entity,void*,int slot,int bankSlot,int bank,int sound,
+                          float frequency,float volume,float rolloff) {
+    if(nitrousHooks && replacementOwner==entity-0x138) {
+        if(enabled && useNitrousAudio && audio::nitrousReady())return;
+        replacementOwner=0;
+        audio::nitrous(false);
+    }
+    reinterpret_cast<GasLoop>(0x4fad40)(entity,slot,bankSlot,bank,sound,frequency,volume,rolloff);
+}
 
 Vec position(uintptr_t entity) {
     auto m=read<uintptr_t>(entity+0x14);
@@ -124,6 +148,8 @@ void reload() {
          option(L"Camera",L"CameraRoofHeight",0,-5,10),
          option(L"Camera",L"CameraRoofDistance",0,-5,20),
          option(L"Camera",L"CameraRoofPitch",0,-45,45)});
+    useNitrousAudio=option(L"Nitrous",L"NitrousAudio",1,0,1)!=0;
+    if(!enabled || !useNitrousAudio || settingGain<=0){replacementOwner=0;audio::nitrous(false);}
     Settings cfg;
     cfg.minimumKmh=option(L"Whoosh",L"MinSpeedKmh",cfg.minimumKmh,5,300);
     cfg.fullKmh=std::max(cfg.minimumKmh+1,option(L"Whoosh",L"FullVolumeSpeedKmh",cfg.fullKmh,6,500));
@@ -132,6 +158,13 @@ void reload() {
     settingGain=option(L"Whoosh",L"VolumePercent",80,0,100)/100.f;
     detector.configure(cfg);
     visuals::Options fx;
+    fx.exhaust=option(L"Nitrous",L"NitrousExhaust",1,0,1)!=0;
+    fx.exhaustSmoke=option(L"Nitrous",L"NitrousSmoke",1,0,1)!=0;
+    wchar_t rgb[64]{};
+    GetPrivateProfileStringW(L"Nitrous",L"NitrousFlameRGB",L"",rgb,64,ini.c_str());
+    const wchar_t* digits=rgb+(rgb[0]==L'#');
+    if(std::wcslen(digits)==6 && std::wcsspn(digits,L"0123456789abcdefABCDEF")==6)
+        fx.flameRGB=int(std::wcstoul(digits,nullptr,16));
     fx.blur=int(option(L"MotionBlur",L"MotionBlur",2,0,2));
     fx.flares=option(L"Trails",L"StreakFlares",1,0,1)!=0;
     fx.strength=option(L"MotionBlur",L"MotionBlurStrength",55,0,150)/100.f;
@@ -147,7 +180,7 @@ void reload() {
         static bool started=false;
         if(FILE* file=_wfopen((directory+L"\\Whoosh.SA.log").c_str(),started?L"ab":L"wb")) {
             started=true;
-            std::fprintf(file,"Whoosh.SA 0.31 settings: Enabled=%d ReloadKey=%d CameraProfile=%d HUDShake=%d MotionBlur=%d Strength=%.0f WindTrails=%d Opacity=%.0f NitroLights=%d StreakFlares=%d WindAudio=%d Volume=%.0f PassDistance=%.1f RoofHeight=%.1f\n",
+            std::fprintf(file,"Whoosh.SA 0.39 settings: Enabled=%d ReloadKey=%d CameraProfile=%d HUDShake=%d MotionBlur=%d Strength=%.0f WindTrails=%d Opacity=%.0f NitroLights=%d StreakFlares=%d WindAudio=%d Volume=%.0f PassDistance=%.1f RoofHeight=%.1f\n",
                 enabled,reloadKey,profile,hudShake,fx.blur,fx.strength*100,fx.wind,fx.windOpacity*100,fx.lights,fx.flares,windEnabled,settingGain*100,cfg.passMetres,cfg.roofMetres);
             std::fclose(file);
         }
@@ -170,6 +203,7 @@ void initialize() {
     reload();
 }
 void stopDriving() {
+    audio::nitrous(false);
     visuals::driving(false);
     if(wasDriving) {audio::silence();detector.reset();wasDriving=false;lastVehicle=0;}
 }
@@ -187,6 +221,7 @@ void service() {
     if(!enabled)return;
     if(pid!=GetCurrentProcessId() || !gameplay()) {stopDriving();return;}
     auto car=reinterpret_cast<FindVehicle>(0x56E0D0)(-1,false);
+    if(replacementOwner && (car!=replacementOwner || !nitroCycle(car)))replacementOwner=0;
     if(!car || read<uintptr_t>(car+0x460)!=reinterpret_cast<FindPed>(0x56E210)(-1)) {stopDriving();return;}
     unsigned type=read<unsigned>(car+0x594);
     if(type>2 && type!=9) {stopDriving();return;}
@@ -201,6 +236,8 @@ void service() {
     wasDriving=true;lastVehicle=car;lastGameTime=t;
     audio::level(std::min(1.f,v)*settingGain);
     Vec vel=read<Vec>(car+0x44)*50.f;
+    if(!audio::nitrousReady())replacementOwner=0;
+    audio::nitrous(car==replacementOwner ? nitroPower(car) : 0.f);
     audio::speed(length(vel));
     StreamedWorld world(car);
     constexpr uintptr_t camera=0xB6F028;
@@ -229,6 +266,16 @@ bool equals(uintptr_t p,const char* bytes,size_t n) {
         return false;
     return std::memcmp(reinterpret_cast<const void*>(p),bytes,n)==0;
 }
+bool audioCall(uintptr_t at, uintptr_t target, uintptr_t handler) {
+    if(read<BYTE>(at)!=0xe8 || at+5+read<int32_t>(at+1)!=target)return false;
+    DWORD old{};
+    if(!VirtualProtect(reinterpret_cast<void*>(at+1),4,PAGE_EXECUTE_READWRITE,&old))return false;
+    const uint32_t displacement=handler-at-5;
+    std::memcpy(reinterpret_cast<void*>(at+1),&displacement,4);
+    FlushInstructionCache(GetCurrentProcess(),reinterpret_cast<void*>(at),5);
+    VirtualProtect(reinterpret_cast<void*>(at+1),4,old,&old);
+    return true;
+}
 void install(HMODULE self) {
     if(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))!=0x400000)return;
     // Confirm the mapped executable layout before following any game pointers.
@@ -248,6 +295,9 @@ void install(HMODULE self) {
     if(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
                           reinterpret_cast<LPCWSTR>(self),&pinned)) {
         module=self;
+        nitrousHooks=audioCall(0x4fb0cd,0x4f6420,reinterpret_cast<uintptr_t>(ignition)) &&
+            audioCall(0x4fb1b2,0x4fad40,reinterpret_cast<uintptr_t>(nitroLoop)) &&
+            audioCall(0x4fb1d3,0x4fad40,reinterpret_cast<uintptr_t>(nitroLoop));
         visuals::install();
         camera::installGame();
         auto delta=read<int32_t>(site+1);

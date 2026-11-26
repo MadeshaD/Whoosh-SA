@@ -3,7 +3,9 @@
 namespace whoosh::visuals {
 struct Options {
     int blur=2;
-    bool wind=true, lights=true, flares=true;
+    int flameRGB=-1;
+    bool exhaustSmoke=true;
+    bool exhaust=true, wind=true, lights=true, flares=true;
     float strength=.55f, windStart=120.f/3.6f, windOpacity=1;
 };
 void configure(Options value);

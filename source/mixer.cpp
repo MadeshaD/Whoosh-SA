@@ -52,11 +52,14 @@ Mixer::Mixer(Bank samples,unsigned randomSeed):bank(std::move(samples)),seed(ran
     for(unsigned group=0;group<bank.size();++group) {
         for(auto& s:bank[group]) {
             if(group==0 && s.number>0 && s.number<24)numbered[s.number]=&s;
+            if(group==2 && s.number>=1 && s.number<=3)nitroSamples[s.number]=&s;
             if(group==1 && s.number>0 && s.number<=5)windSamples[s.number-1]=&s;
         }
     }
 }
 bool Mixer::active() const {
+    if(nitroPower>0 || loopGain>0)return true;
+    for(const auto& shot:shots)if(shot.sample)return true;
     for(auto& v:voices)if(v.sample)return true;
     return windGain>0 && !bank[1].empty() && (targetSpeed>0 || windSpeed>.0001f);
 }
@@ -153,6 +156,54 @@ void Mixer::mixWind(std::array<float,blockFrames*2>& out) {
         }
     }
 }
+void Mixer::nitrous(float power) {
+    if(!nitroSamples[1] || !nitroSamples[2] || !nitroSamples[3])return;
+    bool wasBoosting=nitroPower>.5f;
+    bool boosting=power>.5f;
+    nitroPower=power;
+    if(wasBoosting==boosting)return;
+    // Keep previously audible voices alive during a reversal of the throttle.
+    for(auto& shot:shots)if(shot.sample)shot.fading=true;
+    auto slot=std::min_element(shots.begin(),shots.end(),[](const auto& a,const auto& b){
+        return (a.sample?a.gain:-1.f)<(b.sample?b.gain:-1.f);
+    });
+    *slot={boosting?attack:release,0,1,false};
+}
+float Mixer::nitroFrame(unsigned index,double& pos,bool repeat) const {
+    const auto& s=*nitroSamples[index];
+    size_t frames=s.data.size()/s.channels;
+    size_t j=size_t(pos);
+    size_t next=j+1<frames ? j+1 : (repeat?0:j);
+    float a=s.data[j*s.channels],b=s.data[next*s.channels];
+    float value=(a+(b-a)*float(pos-j))/32768.f;
+    pos+=double(s.rate)/outputRate;
+    if(repeat && pos>=frames)pos-=frames;
+    return value;
+}
+void Mixer::mixNitrous(std::array<float,blockFrames*2>& output) {
+    if(!nitroSamples[sustain])return;
+    float throttle=unitRange(2*nitroPower-1);
+    float target=nitroPower>0 ? .062f+.295f*throttle : 0.f;
+    float step=target>loopGain ? .00016f : .000085f;
+    for(unsigned i=0;i<blockFrames;++i) {
+        loopGain+=std::clamp(target-loopGain,-step,step);
+        float value=0;
+        if(loopGain>0)value=loopGain*nitroFrame(sustain,loopPosition,true);
+        else loopPosition=0;
+        for(auto& shot:shots) {
+            if(!shot.sample)continue;
+            auto& s=*nitroSamples[shot.sample];
+            double remaining=s.data.size()/s.channels-shot.position;
+            float edge=float(std::min({1.,shot.position/(s.rate*.006),remaining/(s.rate*.012)}));
+            float weight=shot.sample==attack ? .40f : .31f;
+            value+=nitroFrame(shot.sample,shot.position,false)*weight*edge*shot.gain*.4f;
+            if(shot.fading)shot.gain-=1.f/(.15f*outputRate);
+            if(shot.gain<=0 || shot.position>=s.data.size()/s.channels)shot={};
+        }
+        output[2*i]+=value;
+        output[2*i+1]+=value;
+    }
+}
 void Mixer::render(std::array<int16_t,blockFrames*2>& pcm,float gain) {
     std::array<float,blockFrames*2> mix{};
     for(auto& v:voices) {
@@ -183,6 +234,7 @@ void Mixer::render(std::array<int16_t,blockFrames*2>& pcm,float gain) {
         }
     }
     mixWind(mix);
+    mixNitrous(mix);
     for(unsigned i=0;i<blockFrames;i++) {
         float left=mix[2*i]*gain,right=mix[2*i+1]*gain;
         float peak=std::max(std::abs(left),std::abs(right));

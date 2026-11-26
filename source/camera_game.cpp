@@ -136,8 +136,7 @@ void updateInput(uintptr_t car, uintptr_t mat, unsigned frame, unsigned zoom, fl
     auto handling=read<uintptr_t>(car+0x384);
     if(handling) input.topSpeed=read<float>(handling+0x2C+0x5C)*50.f;
     input.handbrake=cameraHandbrake(type,(read<uint8_t>(car+0x428)&0x20u)!=0);
-    input.nitro=carWheels && read<unsigned>(car+0x590)==0 && (read<unsigned>(car+0x38C)&0x80000u) &&
-                read<float>(car+0x8A4)<0;
+    input.nitro=nitroActive(car);
     input.contact=read<uintptr_t>(car+0xDC)!=0 && read<float>(car+0xD8)>0;
     input.hittingWorld=read<uintptr_t>(car+0xDC)!=0 && read<float>(car+0xD8)>0 &&
                        std::abs(dot(read<Vec>(car+0xE0),input.forward))>.25f;
@@ -166,15 +165,17 @@ void updateInput(uintptr_t car, uintptr_t mat, unsigned frame, unsigned zoom, fl
     if(!reset) state.entryTime=std::min(.55f,state.entryTime+dt);
     state.effect=state.controller.step(input);
 }
-bool hitGeometry(Vec from, Vec to, Vec& point) {
-    ColPoint hit{};
+bool traceGeometry(Vec from, Vec to, ColPoint& hit) {
     uintptr_t entity{};
     // Match GTA's camera sector lists. Dummy entities have no object camera policy.
     constexpr bool buildings=true, vehicles=true, peds=false, objects=true, dummies=false;
     constexpr bool seeThrough=false, checkCameraIgnore=true, shootThrough=false;
-    if(!reinterpret_cast<Trace>(0x56BA00)(from,to,hit,entity,buildings,vehicles,peds,
-                                          objects,dummies,seeThrough,checkCameraIgnore,shootThrough))
-        return false;
+    return reinterpret_cast<Trace>(0x56BA00)(from,to,hit,entity,buildings,vehicles,peds,
+                                          objects,dummies,seeThrough,checkCameraIgnore,shootThrough);
+}
+bool hitGeometry(Vec from,Vec to,Vec& point) {
+    ColPoint hit{};
+    if(!traceGeometry(from,to,hit))return false;
     point=hit.position;
     return true;
 }
@@ -231,11 +232,18 @@ float applyCamera(float nativeFov) {
         // GTA's discrete look commands include the combined rear view.
         state={}; exitBlend={}; return nativeFov;
     }
-    if(roofOptions.enabled && zoom==2) {
-        // Entry or enabling the roof view on medium selects close. While cycling,
-        // continue in the direction that brought the player to the medium slot.
-        zoom=state.vehicle==car && state.usedRoof && state.zoom==1 ? 3u : 1u;
+    const bool roof=roofOptions.enabled;
+    const unsigned excluded=roof ? 2u : 3u;
+    if(zoom==excluded) {
+        const bool cycling=state.vehicle==car && state.usedRoof==roof && state.profile==selected;
+        if(roof)
+            zoom=cycling && state.zoom==1 ? 3u : 1u;
+        else
+            zoom=cycling && state.zoom==2 ? 0u : 2u;
         write(cameraAddress+0xB4,zoom);
+        // GTA selects the bumper camera on its next update. Its current matrix
+        // still belongs to a chase camera.
+        if(!zoom)return nativeFov;
     }
     updateInput(car,mat,frame,zoom,dt);
     const Response& effect=state.effect;
@@ -257,7 +265,7 @@ float applyCamera(float nativeFov) {
     if(blend==0) return nativeFov;
     const float reach=std::max(.25f,length(desired.look-desired.eye));
     const Vec desiredFront=(desired.look-desired.eye)*(1.f/reach);
-    if(zoom && reach>.05f) {
+    if(zoom) {
         const Vec from=start.position-desired.anchor, to=desired.eye-desired.anchor;
         const float a=length(from), b=length(to);
         if(a>.01f && b>.01f)
@@ -273,6 +281,23 @@ float applyCamera(float nativeFov) {
     const float halfW=rwCam ? std::clamp(read<float>(rwCam+0x68),.1f,3.f) : 1.f;
     const float halfH=rwCam ? std::clamp(read<float>(rwCam+0x6c),.1f,3.f) : .75f;
     const float margin=nearZ*std::sqrt(1+halfW*halfW+halfH*halfH)+.12f;
+    if(zoom==3 && !roofOptions.enabled) {
+        const Vec pivot=desired.anchor;
+        auto floorAt=[&](Vec at,float& height) {
+            // Probe only the road band. Ignore the vehicle through the same
+            // camera collision filter used for the boom and near-plane sweeps.
+            if(at.z>pivot.z+1.f)return false;
+            Vec start{at.x,at.y,std::max(pivot.z+1.f,at.z+margin)};
+            Vec end{at.x,at.y,at.z-margin};
+            ColPoint hit{};
+            if(!traceGeometry(start,end,hit) || hit.normal.z<.55f)return false;
+            height=hit.position.z;
+            return true;
+        };
+        const Vec safe=farEyeAboveRoad(pivot,desired.eye,state.shape.forward*(-1.f),
+                                   std::max(-effect.lag,state.shape.rearExtent+margin),margin,floorAt);
+        desired.eye=desired.eye+(safe-desired.eye)*blend;
+    }
     if(zoom) {
         const Vec radius=desired.eye-desired.anchor;
         const float distance=length(radius);
@@ -287,7 +312,7 @@ float applyCamera(float nativeFov) {
     if(zoom) {
         const auto pose=orient(desired,eye);
         eye=clipNearPlane(desired.anchor,pose,nearZ,halfW,halfH,hitGeometry);
-        if(length(eye-native.position)>.05f)
+        if(roofOptions.enabled && length(eye-native.position)>.05f)
             eye=limitTravel(native.position,eye,.20f,hitGeometry);
     }
     if(zoom && clearance(eye,desired.look-eye,mat,margin)>0) {

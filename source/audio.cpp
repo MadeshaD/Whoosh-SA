@@ -15,13 +15,15 @@ namespace whoosh::audio {
 namespace {
 constexpr unsigned numBlocks=3;
 using File=std::unique_ptr<FILE,decltype(&std::fclose)>;
+std::atomic<float> nitroRequested{};
+std::atomic<bool> nitroLoaded{},deviceOpen{};
 std::atomic<float> windGain{};
 std::atomic<float> speedRatio{};
 std::atomic<unsigned> whooshFiles{},windFiles{};
 std::atomic<const char*> backend{"idle"};
 Bank loadBank(const std::wstring& root) {
     Bank bank;
-    for(unsigned i=0;i<bank.size();++i) {
+    for(unsigned i=0;i<2;++i) {
         auto dir=root+(i==1 ? L"\\Whoosh SFX\\Wind\\" : L"\\Whoosh SFX\\Whoosh\\");
         WIN32_FIND_DATAW data{}; HANDLE find=FindFirstFileW((dir+L"*.wav").c_str(),&data);
         if(find==INVALID_HANDLE_VALUE)continue;
@@ -56,6 +58,14 @@ Bank loadBank(const std::wstring& root) {
             }
         }
     }
+    for(int n=1;n<=3;++n) {
+        auto fileName=root+L"\\Whoosh SFX\\Nitrous\\Nitrous 00 "+std::to_wstring(n)+L".wav";
+        File file(_wfopen(fileName.c_str(),L"rb"),std::fclose);
+        Sample s;
+        s.number=n;
+        if(readPcm16(file.get(),s))bank[2].push_back(std::move(s));
+    }
+    nitroLoaded=bank[2].size()==3;
     whooshFiles=bank[0].size();windFiles=bank[1].size();
     return bank;
 }
@@ -68,6 +78,7 @@ HANDLE wake{};
 std::wstring path;
 // Single consumer shared by the primary device and the compatibility path.
 void drain(Mixer& mixer,unsigned current) {
+    mixer.nitrous(nitroRequested.load());
     mixer.wind(speedRatio.load(std::memory_order_relaxed),windGain.load(std::memory_order_relaxed));
     auto r=reader.load(std::memory_order_relaxed),end=writer.load(std::memory_order_acquire);
     DWORD now=GetTickCount();
@@ -184,7 +195,7 @@ void Output::loop() {
     {
         NativeVoice primary(done);
         if(primary.open()) {
-            backend="XAudio2";
+            backend="XAudio2";deviceOpen=true;
             for(;;) {
                 unsigned current=epoch.load(std::memory_order_acquire);
                 if(current!=previous){mixer.clear();previous=current;}
@@ -194,6 +205,7 @@ void Output::loop() {
             }
         }
     }
+    deviceOpen=false;
     if(SUCCEEDED(com))CoUninitialize();
     mixer.clear();
     for(;;) {
@@ -201,7 +213,7 @@ void Output::loop() {
         unsigned current=epoch.load(std::memory_order_acquire);
         if(current!=previous){cancel();previous=current;}
         if(!device && (!failed || LONG(now-retryAfter)>=0)) {
-            failed=!open();backend=failed?"device unavailable":"waveOut";retryAfter=now+1500;
+            failed=!open();deviceOpen=!failed;backend=failed?"device unavailable":"waveOut";retryAfter=now+1500;
         }
         drain(mixer,current);
         if(!device)mixer.clear();
@@ -210,7 +222,7 @@ void Output::loop() {
             if(b.queued && !(b.header.dwFlags&WHDR_DONE))break;
             if(mixer.active())mixer.render(b.pcm,master.load(std::memory_order_relaxed));else b.pcm.fill(0);
             if(waveOutWrite(device,&b.header,sizeof(b.header))!=MMSYSERR_NOERROR) {
-                close();failed=true;retryAfter=now+1500;break;
+                deviceOpen=false;close();failed=true;retryAfter=now+1500;break;
             }
             b.queued=true; nextBlock=(nextBlock+1)%numBlocks;
         }
@@ -224,8 +236,8 @@ DWORD WINAPI run(void*) {
 }
 }
 void report(FILE* file) {
-    std::fprintf(file,"Audio=%s WhooshWAVs=%u WindWAVs=%u WindSpeedRatio=%.2f\n",
-                 backend.load(),whooshFiles.load(),windFiles.load(),speedRatio.load());
+    std::fprintf(file,"Audio=%s WhooshWAVs=%u WindWAVs=%u WindSpeedRatio=%.2f NitrousBankReady=%d NitrousPlayingRequested=%d\n",
+                 backend.load(),whooshFiles.load(),windFiles.load(),speedRatio.load(),int(nitroLoaded.load()),int(nitroRequested.load()*100));
 }
 void speed(float v) { speedRatio.store(std::isfinite(v) && v>=2?unitRange(v/40.f):0,std::memory_order_relaxed); }
 void windVolume(float gain) { windGain.store(gain,std::memory_order_relaxed); }
@@ -238,7 +250,9 @@ void start(const std::wstring& root) {
     else {CloseHandle(wake);wake=nullptr;}
 }
 void level(float gain) { master.store(unitRange(gain),std::memory_order_relaxed); }
-void silence() { speed(0);if(wake){++epoch;SetEvent(wake);} }
+bool nitrousReady() {return nitroLoaded && deviceOpen;}
+void nitrous(float power) {if(nitroRequested.exchange(power)!=power && wake)SetEvent(wake);}
+void silence() { nitrous(false);speed(0);if(wake){++epoch;SetEvent(wake);} }
 void play(Event event) {
     if(!wake || master.load(std::memory_order_relaxed)<=0)return;
     unsigned w=writer.load(std::memory_order_relaxed);

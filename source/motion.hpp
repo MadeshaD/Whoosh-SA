@@ -44,6 +44,10 @@ inline UV spatialTap(UV uv,Vec motion,float exposure,bool carbon,unsigned pass,
     const float step=std::min(scale*exposure,limit/std::max({dx,dy,1.f}));
     return sampleMotion(uv,motion,step*(carbon ? float(tap) : float(tap)-3.5f));
 }
+inline UV nitrousRadialTap(UV uv,float amount,unsigned tap) {
+    float offset=amount*tap/7.f;
+    return {uv.x+(.5f-uv.x)*offset,uv.y+(.5f-uv.y)*offset};
+}
 // Most Wanted visuallookeffect/nos_radialblur, slot 0x6B40EB80.
 inline float mwNitro(float secondsAfterRelease) {
     float t=unitRange(1.f-secondsAfterRelease/5.f),u=1.f-t;

@@ -6,6 +6,7 @@
 #include "detector.hpp"
 #include "visuals.hpp"
 #include "game.hpp"
+#include "exhaust.hpp"
 #include "motion.hpp"
 #include "carbonblur.hpp"
 
@@ -99,7 +100,8 @@ void motionBlur(float strength,uintptr_t car) {
     const float normalizedSpeed=std::clamp((speed*50.f-10.f)/120.f,0.f,.5f);
     const float exposure=useCarbon ? .024f*normalizedSpeed*(1+boostBlend)*settings.strength
                                    : .014f*strength;
-    const auto filtered=carbon::filter(buffer,w,h,bw,bh,motion,exposure,useCarbon,blurStage,blurResult);
+    const float radial=useCarbon ? .18f*boostBlend*smooth((speed*50.f-18.f)/32.f)*settings.strength : 0.f;
+    const auto filtered=carbon::filter(buffer,w,h,bw,bh,motion,exposure,radial,useCarbon,blurStage,blurResult);
     if(!filtered)return;
     call<void>(0x700CC0);
     call<void>(0x700D70);
@@ -169,7 +171,9 @@ void motionBlur(float strength,uintptr_t car) {
 
 struct Lamp {
     Vec centre{};
-    std::array<Vec,2> steps{}; // Displacements toward older samples at 60 Hz.
+    Vec rearAxis{};
+    std::array<Vec,2> previous{};
+    std::array<unsigned,2> intervals{};
     unsigned count{};
     float radius{};
     DWORD sampleTime{};
@@ -260,71 +264,259 @@ void updateTrails(uintptr_t car,float speed,bool nitro,DWORD now) {
         if(!t.radius || elapsed>100 || length(t.centre-point)>=10.f) {
             t={};
         } else {
-            t.steps[1]=t.steps[0];
-            t.steps[0]=(t.centre-point)*(1000.f/(60.f*elapsed));
+            t.previous[1]=t.previous[0];
+            t.previous[0]=t.centre;
+            t.intervals[1]=t.intervals[0];
+            t.intervals[0]=elapsed;
             t.count=std::min(2u,t.count+1);
         }
         t.centre=point;
         t.sampleTime=now;
-        t.radius=.18f;
+        t.radius=1.f;
+        t.rearAxis=y*(-1.f);
 
     }
 }
 struct Vertex {Vec position,normal;uint32_t color;float u,v;};
 static_assert(sizeof(Vertex)==36);
-void drawLamps(uintptr_t set) {
-    int slot=call<int>(0x731850,"fx");
-    if(slot<0)return;
-    auto dict=call<uintptr_t>(0x408340,slot);
-    auto tex=dict?call<uintptr_t>(0x7F39F0,dict,"sphere"):0;
-    auto raster=tex?read<uintptr_t>(tex):0;
-    auto camera=read<uintptr_t>(0xC1703C);
-    auto frame=camera?read<uintptr_t>(camera+4):0;
-    if(!raster || !frame)return;
-    auto m=call<uintptr_t>(0x7F0990,frame);
-    if(!m)return;
+// Sort the translucent world sprites together before submitting consecutive materials.
+struct Sprite {
+    float depth;
+    uintptr_t raster;
+    unsigned blend,offset;
+};
+constexpr size_t capacity=windParticles.size()+2*(1+3*8)+2*16*7;
+std::array<Sprite,capacity> sprites;
+std::array<Vertex,capacity*6> spriteVertices,orderedVertices;
+unsigned spriteCount{};
+Vec cameraAxis{};
+void queueSprite(const Vertex* vertices,Vec centre,uintptr_t raster,unsigned blend) {
+    float depth=dot(centre,cameraAxis);
+    if(spriteCount>=capacity || !std::isfinite(depth))return;
+    unsigned offset=spriteCount*6;
+    std::copy_n(vertices,6,spriteVertices.begin()+offset);
+    sprites[spriteCount++]={depth,raster,blend,offset};
+}
+void flushSprites() {
+    if(!spriteCount)return;
+    auto rw=read<uintptr_t>(0xC97B24);
+    if(!rw)return;
+    const auto get=read<uintptr_t>(rw+0x24),set=read<uintptr_t>(rw+0x20);
+    constexpr unsigned states[]={1,3,4,6,7,8,9,10,11,12,14,20,29};
+    constexpr unsigned values[]={0,3,3,1,2,0,2,5,2,1,0,1,8};
+    constexpr size_t count=sizeof(states)/sizeof(states[0]);
+    uintptr_t saved[count]{};
+    for(size_t i=0;i<count;++i)if(!call<int>(get,states[i],&saved[i]))return;
+    for(size_t i=0;i<count;++i)call<int>(set,states[i],values[i]);
+    std::sort(sprites.begin(),sprites.begin()+spriteCount,[](const Sprite& a,const Sprite& b){
+        return a.depth!=b.depth ? a.depth>b.depth : a.offset<b.offset;
+    });
+    for(unsigned first=0;first<spriteCount;) {
+        const auto& material=sprites[first];
+        unsigned n=0;
+        do {
+            std::copy_n(spriteVertices.begin()+sprites[first].offset,6,orderedVertices.begin()+n);
+            n+=6;
+            ++first;
+        } while(first<spriteCount && sprites[first].raster==material.raster && sprites[first].blend==material.blend);
+        call<int>(set,1,material.raster);
+        call<int>(set,11,material.blend);
+        if(call<void*>(0x7ef450,orderedVertices.data(),n,nullptr,25u)){
+            call<int>(0x7ef6b0,3);call<int>(0x7ef520);
+        }
+    }
+    for(size_t i=0;i<count;++i)call<int>(set,states[i],saved[i]);
+}
+void drawLamps(uintptr_t m) {
+    auto raster=effectRaster(lastTick,"HEADLIGHTGLOW");
+    if(!m || !raster)return;
     Vec right=read<Vec>(m),up=read<Vec>(m+16);
-    std::array<Vertex,2*(1+3*8)*6> quads{};
-    unsigned n=0;
     for(const auto& lamp:tracks) {
         if(!lamp.radius)continue;
-        auto flare=[&](Vec c,uint32_t color) {
-            const Vec w=right*(lamp.radius*1.5f), h=up*lamp.radius;
+        Vec toCamera=read<Vec>(m+48)-lamp.centre;
+        float distance=length(toCamera);
+        if(distance<.01f)continue;
+        toCamera=toCamera*(1.f/distance);
+        // Carbon car_brakelight entry, flare_params_[2] (second entry is null).
+        const float intensity=std::pow(unitRange(dot(lamp.rearAxis,toCamera)),.45f);
+        if(intensity<.01f)continue;
+        const float scale=lampHalfSizeMetres;
+        auto flare=[&](Vec c,float weight) {
+            const unsigned alpha=unsigned(240.f*intensity*weight);
+            const unsigned red=unsigned(std::min(255.f,256.f*intensity));
+            const unsigned gb=unsigned(50.f*intensity);
+            uint32_t color=(alpha<<24)|(red<<16)|(gb<<8)|gb;
+            c=c+toCamera*.2f;
+            const Vec w=right*scale,h=up*scale;
             Vertex a{c-w+h,{},color,0,0}, b{c+w+h,{},color,1,0};
             Vertex d{c-w-h,{},color,0,1}, e{c+w-h,{},color,1,1};
-            for(auto vertex:{a,b,d,b,e,d}) quads[n++]=vertex;
+            Vertex vertices[]={a,b,d,b,e,d};
+            queueSprite(vertices,c,raster,2);
         };
-        flare(lamp.centre,0xffff6632u);
-        if(!lamp.count) continue;
-        // MW 0x744FD0 / Carbon 0x7CCCD0: successive pairs in the circular
-        // position history, eight interpolated flare submissions per pair.
-        const Vec older=lamp.centre+lamp.steps[0];
-        const Vec points[]={lamp.centre,older,older+lamp.steps[1]};
-        const unsigned count=lamp.count+1;
-        for(unsigned k=0;k<count;++k) {
-            const unsigned next=(k+1)%count;
+        flare(lamp.centre,1.f);
+        // Measure each observed interval independently, as in NOSTrailFix.
+        // Reconstruct a continuous 60 Hz history at GTA's variable frame rate.
+        Vec head=lamp.centre;
+        for(unsigned k=0;k<lamp.count;++k) {
+            Vec start=k ? lamp.previous[k-1] : lamp.centre;
+            Vec step=(lamp.previous[k]-start)*(1000.f/(60.f*lamp.intervals[k]));
             for(unsigned j=1;j<=8;++j) {
-                const float f=j/8.f;
-                const float age=(k+(float(next)-k)*f)/lamp.count;
-                const unsigned alpha=unsigned((97.5f/count)*(1.f-age)*(1.f-age));
-                flare(points[k]+(points[next]-points[k])*f,(alpha<<24)|0xff1610u);
+                float f=j/8.f;
+                flare(head+step*f,(1.f-(k+f)/3.f)*.55f);
+            }
+            head=head+step;
+        }
+    }
+
+}
+
+// Carbon VPAK emitter records refer to two particle textures by their BIN keys.
+// Keep particles local to the exhaust and advance their ages on GTA's game clock.
+uintptr_t exhaustOwner{};
+struct ExhaustHistory {
+    uintptr_t car{};
+    DWORD tick{};
+    std::array<Vec,2> roots{};
+    Vec forward{},velocity{};
+    std::array<std::array<ExhaustStream,2>,3> streams{};
+    unsigned seed=1;
+
+    float random() {
+        seed=1664525u*seed+1013904223u;
+        return float(seed>>8)/16777216.f;
+    }
+};
+ExhaustHistory exhaustHistory;
+void drawExhaust(uintptr_t car,DWORD now,float power,uintptr_t view) {
+    auto& history=exhaustHistory;
+    exhaustOwner=0;
+    if(!settings.exhaust || !nitroVehicle(car) || (read<unsigned>(car+0x40)&0x08000100u)){
+        history.car=0;return;
+    }
+    const bool installed=(read<unsigned>(car+0x38c)&0x80000u)!=0;
+    if(!installed && (history.car!=car || !history.car))return;
+    auto modelId=read<unsigned short>(car+0x22);
+    auto model=modelId<20000 ? read<uintptr_t>(0xA9B0C8+modelId*4) : 0;
+    auto dummies=model?read<uintptr_t>(model+0x5c):0;
+    auto matrix=read<uintptr_t>(car+0x14);
+    if(!dummies || !matrix)return;
+    const Vec exhaust=read<Vec>(dummies+6*sizeof(Vec));
+    if(length(exhaust)<.05f || length(exhaust)>20.f)return;
+    auto fire=effectRaster(now,"FX_STRIPE03_ADDITIVE");
+    auto smokeRaster=settings.exhaustSmoke ? effectRaster(now,"FX_SMK03_BLEND") : 0;
+    if(!fire || !view)return;
+    if(installed)exhaustOwner=car;
+    Vec right=read<Vec>(view),up=read<Vec>(view+16);
+    Vec x=read<Vec>(matrix),forward=read<Vec>(matrix+16),z=read<Vec>(matrix+32);
+    Vec velocity=read<Vec>(car+0x44)*50.f;
+    Vec anchor=read<Vec>(matrix+48)+forward*exhaust.y+z*exhaust.z;
+    std::array<Vec,2> roots={anchor+x*exhaust.x,anchor-x*exhaust.x};
+    auto handling=read<uintptr_t>(car+0x384);
+    const int pipes=handling && (read<unsigned>(handling+0xcc)&0x2000) && std::abs(exhaust.x)>.01f ? 2 : 1;
+    if(history.car!=car || lastCar!=car || now-history.tick>250 || length(roots[0]-history.roots[0])>25.f) {
+        history={};history.car=car;history.tick=now;
+        history.roots=roots;history.forward=forward;history.velocity=velocity;
+    }
+    float dt=(now-history.tick)*.001f;
+    history.tick=now;
+    bool any=false;
+    for(unsigned layer=0;layer<(smokeRaster ? 3u : 2u);++layer) {
+        const auto& e=exhaustEmitters[layer];
+        for(int pipe=0;pipe<pipes;++pipe) {
+            auto& stream=history.streams[layer][pipe];
+            for(auto& puff:stream.puffs) {
+                if(puff.life>0 && (puff.age+=dt)>=puff.life)puff.life=0;
+                any|=puff.life>0;
+            }
+            if(power<=0){stream.phase=0;continue;}
+            float rate=e.rate*power;
+            stream.phase+=dt*rate;
+            while(stream.phase>=1.f) {
+                stream.phase-=1.f;
+                float age=stream.phase/rate;
+                float f=unitRange(1.f-age/dt);
+                Vec root=history.roots[pipe]+(roots[pipe]-history.roots[pipe])*f;
+                Vec axis=history.forward+(forward-history.forward)*f;
+                Vec inherited=history.velocity+(velocity-history.velocity)*f;
+                Vec direction=axis*(-1.f);
+                if(layer!=2) {
+                    // SpreadAngle is 2 degrees total for both fire emitters.
+                    direction=direction+(x*(2*history.random()-1)+z*(2*history.random()-1))*.017455f;
+                }
+                direction=direction*(1.f/std::max(.001f,length(direction)));
+                float life=e.life*(1-e.lifeVariance*history.random());
+                float strength=.24f+.76f*unitRange(2*power-1);
+                auto& puff=stream.puffs[stream.next++%stream.puffs.size()];
+                puff={root,inherited+direction*e.speed,age,life,strength,
+                      layer==2 ? 6.2831853f*history.random() : 0.f};
+                any=true;
             }
         }
     }
-    call<int>(set,1,raster);
-    call<int>(set,9,2);
-    call<int>(set,11,2); // additive light
-    if(n && call<void*>(0x7EF450,quads.data(),n,nullptr,25u)) {
-        call<int>(0x7EF6B0,3);call<int>(0x7EF520);
+    history.roots=roots;history.forward=forward;history.velocity=velocity;
+    if(!any){if(!installed)history.car=0;return;}
+    for(unsigned layer:{2u,1u,0u}) {
+        // emcar_nos_fire, emcar_nos_fire2 and emcar_nos_glow.
+        const bool smoke=layer==2;
+        if(smoke && !smokeRaster)continue;
+        const auto& e=exhaustEmitters[layer];
+
+        for(int pipe=0;pipe<pipes;++pipe) {
+            const auto& stream=history.streams[layer][pipe];
+            for(unsigned j=0;j<stream.puffs.size();++j) {
+                const auto& puff=stream.puffs[(stream.next+j)%stream.puffs.size()];
+                if(puff.life<=0)continue;
+                auto weights=exhaustKeyWeights(unitRange(1.f-(puff.life-puff.age)/e.life));
+                float size=0;
+                for(unsigned k=0;k<4;++k)size+=weights[k]*e.size[k];
+                size=.5f*std::max(0.f,size)*(.4f+.6f*puff.strength);
+                if(!smoke)size*=1.15f;
+                auto channel=[&](unsigned shift) {
+                    float value=0;
+                    for(unsigned k=0;k<4;++k)value+=weights[k]*((e.color[k]>>shift)&255u);
+                    return unsigned(std::clamp(value,0.f,255.f));
+                };
+                unsigned rgb=(channel(24)<<16)|(channel(16)<<8)|channel(8);
+                if(!smoke && settings.flameRGB>=0) {
+                    const unsigned brightness=std::max({rgb>>16,(rgb>>8)&255u,rgb&255u});
+                    auto tinted=[&](unsigned shift){return ((unsigned(settings.flameRGB)>>shift)&255u)*brightness/255u;};
+                    rgb=(tinted(16)<<16)|(tinted(8)<<8)|tinted(0);
+                }
+                unsigned alpha=unsigned(channel(0)*puff.strength);
+                Vec c=puff.position(e.gravity);
+                float cs=std::cos(puff.angle),sn=std::sin(puff.angle);
+                Vec w=(right*cs+up*sn)*size,h=(up*cs-right*sn)*size;
+                auto vertex=[&](float u,float v,float coverage){
+                    return Vertex{c+w*(2*u-1)+h*(1-2*v),{},rgb|(unsigned(alpha*coverage)<<24),u,v};
+                };
+                auto strip=[&](float left,float rightU,float a,float b){
+                    Vertex tl=vertex(left,0,a),tr=vertex(rightU,0,b);
+                    Vertex bl=vertex(left,1,a),br=vertex(rightU,1,b);
+                    Vertex vertices[]={tl,tr,bl,tr,br,bl};
+                    queueSprite(vertices,c,smoke?smokeRaster:fire,smoke?6:2);
+                };
+                if(smoke)strip(0,1,1,1);
+                else {strip(0,.25f,0,1);strip(.25f,.75f,1,1);strip(.75f,1,1,0);}
+            }
+        }
     }
 }
-
-void drawTracks(DWORD now) {
+uintptr_t exhaustDispatch=0x6a3bd0;
+void __fastcall nativeExhaust(uintptr_t car,void*,float power) {
+    if(settings.exhaust && drivingNow && exhaustOwner==car && nitroVehicle(car) &&
+       !(read<unsigned>(car+0x40)&0x08000100u)) {
+        if(read<uintptr_t>(car+0x978) || read<uintptr_t>(car+0x97c))
+            reinterpret_cast<void(__thiscall*)(uintptr_t)>(0x6a3e60)(car);
+        return;
+    }
+    reinterpret_cast<void(__thiscall*)(uintptr_t,float)>(exhaustDispatch)(car,power);
+}
+void drawTracks(DWORD now,uintptr_t view) {
     // MAIN.dds cell (128,192)-(160,224), with its original filtering border.
     // XSpriteManager truncates UV*255 to bytes before converting back to float.
     constexpr float u0=127.f/255,u1=159.f/255;
     constexpr float v0=191.f/255,v1=223.f/255;
-    static std::array<Vertex,windParticles.size()*6> batch;
+    uintptr_t raster=0;
     unsigned used=0;
     for(auto& w:windParticles) {
         if(!w.color)continue;
@@ -335,26 +527,12 @@ void drawTracks(DWORD now) {
         constexpr Vec height={0,0,255.f/2048};
         Vertex p{a,{},w.color,u0,v0},q{a+height,{},w.color,u1,v0};
         Vertex r{b+height,{},w.color,u1,v1},t{b,{},w.color,u0,v1};
-        for(auto v:{p,q,r,p,r,t})batch[used++]=v;
+        if(!used++)raster=effectRaster(now,"WINDTRAIL");
+        Vertex vertices[]={p,q,r,p,r,t};
+        if(raster)queueSprite(vertices,(p.position+r.position)*.5f,raster,2);
     }
-    auto raster=used?effectRaster(now,"WINDTRAIL"):0;
-    if(!raster)used=0;
-    if(!used && !tracks[0].radius && !tracks[1].radius)return;
-    auto rw=read<uintptr_t>(0xC97B24);
-    if(!rw)return;
-    auto get=read<uintptr_t>(rw+0x24),set=read<uintptr_t>(rw+0x20);
-    constexpr unsigned states[]={1,6,8,10,11,12,20,29,9};
-    constexpr unsigned values[]={0,1,0,5,6,1,1,8,2};
-    uintptr_t saved[9]{};
-    for(unsigned i=0;i<9;++i)if(!call<int>(get,states[i],&saved[i]))return;
-    for(unsigned i=0;i<9;++i)call<int>(set,states[i],values[i]);
-    if(used){++windFrames;call<int>(set,1,raster);call<int>(set,11,2);}
-    if(used && call<void*>(0x7EF450,batch.data(),used,nullptr,25u)) {
-        call<int>(0x7EF6B0,3);
-        call<int>(0x7EF520);
-    }
-    if(tracks[0].radius || tracks[1].radius){++lampFrames;drawLamps(set);}
-    for(unsigned i=0;i<9;++i)call<int>(set,states[i],saved[i]);
+    if(used && raster)++windFrames;
+    if(tracks[0].radius || tracks[1].radius){++lampFrames;drawLamps(view);}
 }
 // Collect final world coordinates and colors at the two active 2DFX emitter calls.
 struct Light {Vec pos;float size,range,pull;unsigned rgb,alpha;bool below;};
@@ -493,13 +671,34 @@ void streetFlares(uintptr_t car,DWORD now) {
     flareFrames+=drawn;
 }
 
+bool redirect(uintptr_t site,uintptr_t dest);
+void installExhaustDispatch() {
+    constexpr uintptr_t sites[]={0x6a405a,0x6a406b,0x6a40e1};
+    // Inspect after ASI startup. Forward the extension's existing bike handler.
+    const uintptr_t target=sites[0]+5+read<int32_t>(sites[0]+1);
+    for(auto site:sites)
+        if(read<BYTE>(site)!=0xe8 || site+5+read<int32_t>(site+1)!=target)return;
+    if(target!=0x6a3bd0) {
+        HMODULE owner{};
+        if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(target),&owner))return;
+        if(owner!=GetModuleHandleW(L"ProperBikeNitro.SA.asi") &&
+           owner!=GetModuleHandleW(L"ProperBikeNitroSA.asi") &&
+           owner!=GetModuleHandleW(L"ProperBikeNitro.asi"))return;
+        bikeNitroLayout=true;
+    }
+    exhaustDispatch=target;
+    for(auto site:sites)redirect(site,reinterpret_cast<uintptr_t>(nativeExhaust));
+}
 void render() {
+    static const bool initialized=(installExhaustDispatch(),true);
+    (void)initialized;
     uintptr_t car=drivingNow?call<uintptr_t>(0x56E0D0,-1,false):0;
     float strength=0;
     replaceNative=car && settings.blur && settings.strength>0;
     if(car) {
         float speed=length(read<Vec>(car+0x44))*50.f;
-        bool nitro=read<unsigned>(car+0x590)==0 && (read<unsigned>(car+0x38c)&0x80000u) && read<float>(car+0x8a4)<0;
+        bool nitro=nitroActive(car);
         DWORD now=read<DWORD>(0xB7CB84);
         if(lastCar!=car || now-lastTick>250){boostBlend=0;mwReleaseSeconds=5.f;clearTrails();}
         mwReleaseSeconds=nitro?0.f:std::min(5.f,mwReleaseSeconds+float(now-lastTick)*.001f);
@@ -509,12 +708,20 @@ void render() {
             strength=settings.strength*blurDrive(settings.blur==2,speed,boostBlend);
             if(settings.blur==1) {
                 float pulse=mwNitro(mwReleaseSeconds);
-                strength=settings.strength*std::max(blurDrive(false,speed,0),pulse*unitRange(speed/18.f));
+                strength=settings.strength*std::max(blurDrive(false,speed,0),pulse*boostBlend*unitRange(speed/18.f));
             }
             updateTrails(car,speed,nitro,now);
-            drawTracks(now);
+            auto camera=read<uintptr_t>(0xC1703C);
+            auto frame=camera?read<uintptr_t>(camera+4):0;
+            auto view=frame?call<uintptr_t>(0x7F0990,frame):0;
+            cameraAxis=view?read<Vec>(view+32):Vec{};
+            spriteCount=0;
+            drawTracks(now,view);
+            drawExhaust(car,now,nitroPower(car),view);
+            if(view)flushSprites();
         }
     }
+    if(!car)exhaustOwner=0;
     lastCar=car;
     call<void>(originalRender);
     if(replaceNative)motionBlur(strength,car);
@@ -546,7 +753,10 @@ void report(FILE* file) {
     std::fprintf(file,"BlurStage=%s HRESULT=%08lX BlurFrames=%u WindTrailBatches=%u NitroLightBatches=%u FlareFrames=%u\n",
                  blurStage,static_cast<unsigned long>(blurResult),blurFrames,windFrames,lampFrames,flareFrames);
 }
-void configure(Options value){settings=value;}
+void configure(Options value){
+    if(settings.exhaustSmoke && !value.exhaustSmoke)exhaustHistory.streams[2]={};
+    settings=value;
+}
 void driving(bool active){drivingNow=active;}
 void install() {
     constexpr uintptr_t effectCall=0x53ead3,speedCall=0x704e8a;

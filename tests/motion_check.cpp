@@ -3,6 +3,14 @@
 using namespace whoosh;
 using namespace whoosh::visuals;
 int main(){
+    for(unsigned i=0;i<8;++i) {
+        auto center=nitrousRadialTap({.5f,.5f},.18f,i);
+        assert(center.x==.5f && center.y==.5f);
+        auto off=nitrousRadialTap({0,1},0,i);
+        assert(off.x==0 && off.y==1);
+    }
+    auto corner=nitrousRadialTap({0,1},.18f,7);
+    assert(corner.x>.08f && corner.y<.92f);
     float sum=0;
     for(float w:carbonWeights) sum+=w;
     assert(std::abs(sum-1)<1e-6f);

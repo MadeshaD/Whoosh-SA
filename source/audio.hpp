@@ -8,6 +8,8 @@ void start(const std::wstring& root);
 void windVolume(float gain);
 void speed(float metresPerSecond);
 void level(float gain);
+bool nitrousReady();
+void nitrous(float power);
 void silence();
 void play(Event event);
 }

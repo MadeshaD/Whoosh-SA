@@ -137,6 +137,32 @@ template<class Cast> Vec clipNearPlane(Vec pivot,const Pose& view,float nearZ,
     }
     return pivot+along*stop;
 }
+// Keep the eye on its orbit when its near plane reaches the road. Shortening
+// the boom toward its pivot here would pull the far camera into the vehicle.
+template<class Floor> Vec farEyeAboveRoad(Vec pivot,Vec requested,Vec rearward,
+                                         float minimumRadius,float margin,Floor floorAt) {
+    Vec delta=requested-pivot;
+    const float distance=length(delta);
+    const float radius=std::max(distance,minimumRadius);
+    const float horizontal=std::hypot(delta.x,delta.y);
+    Vec bearing=horizontal>.01f ? Vec{delta.x/horizontal,delta.y/horizontal,0} : rearward;
+    const float span=std::hypot(bearing.x,bearing.y);
+    if(span<.01f || radius<=.01f)return requested;
+    bearing={bearing.x/span,bearing.y/span,0};
+    float height=distance>.01f ? delta.z*radius/distance : 0.f;
+    auto onOrbit=[&] {
+        return pivot+bearing*std::sqrt(std::max(0.f,radius*radius-height*height))+Vec{0,0,height};
+    };
+    Vec eye=onOrbit();
+    // Re-sample after shifting horizontally, e.g. on a sloping road.
+    for(int i=0;i<3;++i) {
+        float ground{};
+        if(!floorAt(eye,ground) || eye.z>=ground+margin-.001f)break;
+        height=std::clamp(ground+margin-pivot.z,-radius,radius);
+        eye=onOrbit();
+    }
+    return eye;
+}
 struct HudVertex { float x,y,z,rhw; uint32_t color; float u,v; };
 static_assert(sizeof(HudVertex)==28);
 void scaleHudVertices(const HudVertex* input, HudVertex* output, int count,

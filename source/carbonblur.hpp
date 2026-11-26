@@ -33,7 +33,7 @@ struct Targets {
     }
 };
 inline uintptr_t filter(uintptr_t capture,int w,int h,int bw,int bh,
-                         Vec motion,float exposure,bool useCarbon,const char*& stage,HRESULT& result) {
+                         Vec motion,float exposure,float radial,bool useCarbon,const char*& stage,HRESULT& result) {
     stage="raster extension";
     // RenderWare caches stage bindings. Read the real texture from its D3D9 extension.
     int ext=*reinterpret_cast<const int*>(0xB4E9E0);
@@ -119,7 +119,7 @@ inline uintptr_t filter(uintptr_t capture,int w,int h,int bw,int bh,
     device->SetSamplerState(0,D3DSAMP_MIPFILTER,D3DTEXF_NONE);
     // Blend the successive samples of this pass as a running weighted mean.
     // Alpha belongs to the coverage mesh in the later composite, so keep it opaque here.
-    const unsigned passes=useCarbon ? 4 : 3;
+    const unsigned passes=useCarbon ? (radial>0.f ? 5 : 4) : 3;
     for(unsigned pass=0;pass<passes && ok;++pass) {
         stage="bind spatial pass target";
         const unsigned dest=pass%2;
@@ -140,6 +140,11 @@ inline uintptr_t filter(uintptr_t capture,int w,int h,int bw,int bh,
                 UV uv{float(i&1),float(i>>1)};
                 UV sample=pass ? spatialTap(uv,motion,exposure,useCarbon,pass,tap,desc.Width,desc.Height)
                                : UV{uv.x*w/bw,uv.y*h/bh};
+                if(pass==4) {
+                    // Sample towards the optical centre. The middle pixel stays fixed
+                    // even when the player is looking sideways or backwards.
+                    sample=nitrousRadialTap(uv,radial,tap);
+                }
                 quad[i]={uv.x*desc.Width-.5f,uv.y*desc.Height-.5f,0,1,
                          (spatialAlpha(useCarbon,tap)<<24)|0xffffffu,sample};
             }

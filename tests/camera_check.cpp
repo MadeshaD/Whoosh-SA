@@ -230,6 +230,14 @@ void orbitAndHud() {
         assert(near(length(clip-p.anchor),1.76f));
         assert(near(dot(orient(p,clip).front,dir),1));
     }
+    // Rotating an off-axis far view must preserve its orbit radius at steep pitches.
+    Pose far{{20,22,9},{0,1,0},{0,0,1}};
+    for(float pitch=-1.35f;pitch<1.36f;pitch+=.05f) {
+        r.viewFront={0,std::cos(pitch),std::sin(pitch)};
+        auto p=place(far,v,r,false);
+        assert(near(length(p.eye-v.centre),length(far.position-v.centre)));
+        assert(length(p.anchor-v.centre)<1e-5f);
+    }
     // A thin obstacle touches the top-right corner but misses the centre ray.
     Pose wallView{{0,-5,0},{0,1,0},{0,0,1}};
     auto edge=[](Vec from,Vec to,Vec& hit) {
@@ -262,6 +270,28 @@ int main() {
     assert(cameraHandbrake(T::Automobile,true) && !cameraHandbrake(T::Automobile,false));
     assert(!cameraHandbrake(T::Helicopter,true) && !hasCarWheels(T::Bicycle));
 
+    // Far views on a road: the final centre and near-plane collision sweeps
+    // must not shorten the orbit into the body, even with a collapsed stock eye.
+    for(float slope:{-.12f,0.f,.12f}) {
+        Vec pivot{0,0,1};
+        auto ground=[&](Vec p){return slope*p.y;};
+        auto floor=[&](Vec p,float& h){h=ground(p);return true;};
+        auto cast=[&](Vec a,Vec b,Vec& hit){
+            float za=a.z-ground(a),zb=b.z-ground(b);
+            if(za<0 || zb>0 || za==zb)return false;
+            hit=a+(b-a)*(za/(za-zb));return true;
+        };
+        for(float stockRadius:{.4f,8.f}) for(int pitch=-85;pitch<=85;++pitch) {
+            float angle=pitch*.01745329252f;
+            Vec requested=pivot+Vec{0,-std::cos(angle),std::sin(angle)}*stockRadius;
+            Vec eye=farEyeAboveRoad(pivot,requested,{0,-1,0},5.9f,.68f,floor);
+            eye=limitTravel(pivot,eye,.24f,cast);
+            Placement placed{pivot,eye,pivot,{0,0,1}};
+            eye=clipNearPlane(pivot,orient(placed,eye),.3f,1,.75f,cast);
+            assert(length(eye-pivot)>5.8f);
+            assert(bodyClearance(eye-pivot,{0,0,1},{-1,-2,-.7f},{1,2,1},.68f)==0);
+        }
+    }
     avoidRoof(); checkModes(); levelOrbit(); roadNoise(); orbitAndHud();
     for(int fps:{25,30,60,144}) {returnDuringTurn(fps); returnSettings(fps); parkingAndLightContact(fps); regulation(fps); impulse(fps); autoFollowAndMouse(fps);}
     std::puts("Four views, two driving profiles, stock bypass, braking, impact envelope, road noise, orbit, clipping and HUD verified.");
