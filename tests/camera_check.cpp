@@ -1,4 +1,4 @@
-#include "../source/camera.hpp"
+#include "../source/chase_collision.hpp"
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -122,19 +122,62 @@ void returnDuringTurn(int fps) {
         }
     }
 }
-void avoidRoof() {
-    Vec p{15,11,2},eye{};
-    auto clear=[&](Vec candidate,Vec& out) {
-        if(candidate.z<2.2f) return false;
-        out=candidate; return true;
+void chaseCollision() {
+    const ChaseLens lens{.7f,1.12f,.63f};
+    const ChaseBody body{{0,0,.62f},{1,0,0},{0,1,0},{0,0,1},
+                         {-1.12f,-2.35f,-.55f},{1.14f,2.48f,.62f},true};
+    const Vec pivot{0,0,1.16f};
+    Vehicle vehicle; vehicle.centre=body.centre;
+    Response motion; motion.lag=-5.4f;
+    // The game has shortened its own camera while an unrelated world-space
+    // mouse orbit still has a clear view. Use the pre-collision stock zoom.
+    Pose stock{pivot+Vec{0,-.18f,0},{0,1,0},{0,0,1}};
+    motion.viewFront={1,0,0};
+    const auto clear=place(stock,vehicle,motion,false,{}, {pivot,8.f});
+    assert(near(length(clear.eye-pivot),8.f));
+    assert(near(clear.eye.x,-8.f));
+    for(float winding:{-1.f,1.f}) for(float slope:{-.12f,0.f,.12f}) {
+        auto floor=[&](Vec a,Vec b,ChaseHit& hit) {
+            const float ad=a.z-slope*a.y, bd=b.z-slope*b.y;
+            if(ad<0 || bd>0 || ad==bd) return false;
+            hit={a+(b-a)*(ad/(ad-bd)),Vec{0,-slope,1}*(winding/std::hypot(slope,1.f))};
+            return true;
+        };
+        ChaseTravel travel;
+        for(int frame=0;frame<480;++frame) {
+            const float yaw=frame*.032f,pitch=.43f*std::sin(frame*.024f)-.11f;
+            motion.viewFront={std::sin(yaw)*std::cos(pitch),std::cos(yaw)*std::cos(pitch),std::sin(pitch)};
+            auto p=place(stock,vehicle,motion,false,{}, {pivot,8.f});
+            const auto actual=resolveChase(p,body,lens,travel,1.f/60,floor);
+            assert(length(actual.position-pivot)>5.f);
+            assert(actual.position.z>=slope*actual.position.y);
+            for(Vec corner:nearCorners(actual,lens)) {
+                const Vec q=actual.position+corner;
+                assert(q.z>=slope*q.y-.001f);
+            }
+        }
+    }
+    // Check the frustum against an off-axis pillar, then remove it. Recovery
+    // must extend the arm progressively without changing the user's bearing.
+    bool obstacle=true;
+    auto pillar=[&](Vec a,Vec b,ChaseHit& contact) {
+        if(!obstacle || a.y< -3 || b.y>= -3 || a.y==b.y) return false;
+        const Vec q=a+(b-a)*((-3.f-a.y)/(b.y-a.y));
+        if(q.x<.19f || q.x>.9f || q.z<.1f || q.z>3.f) return false;
+        contact={q,{0,1,0}}; return true;
     };
-    assert(liftLowEye(p,p+Vec{-3,4,-2},2.f,clear,eye));
-    assert(near(eye.x,12) && near(eye.y,15) && eye.z>=2.2f);
-    const Vec wallLimited=eye;
-    auto blocked=[](Vec,Vec&) { return false; };
-    assert(!liftLowEye(p,p+Vec{-3,4,-2},2.f,blocked,eye));
-    assert(length(eye-wallLimited)==0);
-
+    ChaseBody none{};
+    Placement p{{0,0,1},{0,-6,1},{0,0,1},{0,0,1}};
+    ChaseTravel arm;
+    float radius=length(resolveChase(p,none,lens,arm,.02f,pillar).position-p.anchor);
+    assert(radius>3.f && radius<4.f);
+    obstacle=false;
+    for(int i=0;i<60;i++) {
+        float next=length(resolveChase(p,none,lens,arm,.02f,pillar).position-p.anchor);
+        assert(next>=radius-.002f && next-radius<.6f);
+        radius=next;
+    }
+    assert(near(radius,6.f,.012f));
 }
 void impulse(int fps) {
     auto i=drive(Profile::Carbon,2,fps,8);
@@ -238,14 +281,6 @@ void orbitAndHud() {
         assert(near(length(p.eye-v.centre),length(far.position-v.centre)));
         assert(length(p.anchor-v.centre)<1e-5f);
     }
-    // A thin obstacle touches the top-right corner but misses the centre ray.
-    Pose wallView{{0,-5,0},{0,1,0},{0,0,1}};
-    auto edge=[](Vec from,Vec to,Vec& hit) {
-        if(from.x<.25f || from.z<.15f || to.y>=-3) return false;
-        hit={from.x,-3,from.z}; return true;
-    };
-    const auto safe=clipNearPlane({},wallView,.3f,1,.7f,edge);
-    assert(near(safe.y,-3.18f));
     const HudVertex src[2]={{0,0,.2f,.5f,0xff112233,.4f,.7f},{960,540,.9f,1,0xff001122,0,1}};
     HudVertex copy[2]{};
     scaleHudVertices(src,copy,2,960,540,1.05f);
@@ -270,29 +305,7 @@ int main() {
     assert(cameraHandbrake(T::Automobile,true) && !cameraHandbrake(T::Automobile,false));
     assert(!cameraHandbrake(T::Helicopter,true) && !hasCarWheels(T::Bicycle));
 
-    // Far views on a road: the final centre and near-plane collision sweeps
-    // must not shorten the orbit into the body, even with a collapsed stock eye.
-    for(float slope:{-.12f,0.f,.12f}) {
-        Vec pivot{0,0,1};
-        auto ground=[&](Vec p){return slope*p.y;};
-        auto floor=[&](Vec p,float& h){h=ground(p);return true;};
-        auto cast=[&](Vec a,Vec b,Vec& hit){
-            float za=a.z-ground(a),zb=b.z-ground(b);
-            if(za<0 || zb>0 || za==zb)return false;
-            hit=a+(b-a)*(za/(za-zb));return true;
-        };
-        for(float stockRadius:{.4f,8.f}) for(int pitch=-85;pitch<=85;++pitch) {
-            float angle=pitch*.01745329252f;
-            Vec requested=pivot+Vec{0,-std::cos(angle),std::sin(angle)}*stockRadius;
-            Vec eye=farEyeAboveRoad(pivot,requested,{0,-1,0},5.9f,.68f,floor);
-            eye=limitTravel(pivot,eye,.24f,cast);
-            Placement placed{pivot,eye,pivot,{0,0,1}};
-            eye=clipNearPlane(pivot,orient(placed,eye),.3f,1,.75f,cast);
-            assert(length(eye-pivot)>5.8f);
-            assert(bodyClearance(eye-pivot,{0,0,1},{-1,-2,-.7f},{1,2,1},.68f)==0);
-        }
-    }
-    avoidRoof(); checkModes(); levelOrbit(); roadNoise(); orbitAndHud();
+    chaseCollision(); checkModes(); levelOrbit(); roadNoise(); orbitAndHud();
     for(int fps:{25,30,60,144}) {returnDuringTurn(fps); returnSettings(fps); parkingAndLightContact(fps); regulation(fps); impulse(fps); autoFollowAndMouse(fps);}
     std::puts("Four views, two driving profiles, stock bypass, braking, impact envelope, road noise, orbit, clipping and HUD verified.");
 }

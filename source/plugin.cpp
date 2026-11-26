@@ -180,7 +180,7 @@ void reload() {
         static bool started=false;
         if(FILE* file=_wfopen((directory+L"\\Whoosh.SA.log").c_str(),started?L"ab":L"wb")) {
             started=true;
-            std::fprintf(file,"Whoosh.SA 0.39 settings: Enabled=%d ReloadKey=%d CameraProfile=%d HUDShake=%d MotionBlur=%d Strength=%.0f WindTrails=%d Opacity=%.0f NitroLights=%d StreakFlares=%d WindAudio=%d Volume=%.0f PassDistance=%.1f RoofHeight=%.1f\n",
+            std::fprintf(file,"Whoosh.SA 0.40 settings: Enabled=%d ReloadKey=%d CameraProfile=%d HUDShake=%d MotionBlur=%d Strength=%.0f WindTrails=%d Opacity=%.0f NitroLights=%d StreakFlares=%d WindAudio=%d Volume=%.0f PassDistance=%.1f RoofHeight=%.1f\n",
                 enabled,reloadKey,profile,hudShake,fx.blur,fx.strength*100,fx.wind,fx.windOpacity*100,fx.lights,fx.flares,windEnabled,settingGain*100,cfg.passMetres,cfg.roofMetres);
             std::fclose(file);
         }

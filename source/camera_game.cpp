@@ -4,6 +4,7 @@
 #include <cstring>
 #include <vector>
 #include "camera_game.hpp"
+#include "chase_collision.hpp"
 #include "game.hpp"
 
 namespace whoosh::camera {
@@ -20,7 +21,6 @@ struct State {
     uintptr_t vehicle{};
     unsigned frame{}, zoom{};
     VehicleType type{};
-    Vec lastCentre{};
     std::array<float,4> compression{};
     Vec boxMin{},boxMax{};
     bool hasBox{};
@@ -32,6 +32,7 @@ struct State {
     Vehicle shape{};
     Controller controller{};
     Response effect{};
+    ChaseTravel travel{};
 };
 State state;
 Profile selected{};
@@ -78,15 +79,14 @@ uintptr_t playerVehicle(unsigned& mode, unsigned& zoom) {
     auto ped=reinterpret_cast<FindPed>(0x56E210)(-1);
     return ped && ped==read<uintptr_t>(car+0x460) ? car : 0;
 }
-void updateInput(uintptr_t car, uintptr_t mat, unsigned frame, unsigned zoom, float dt) {
+void updateInput(uintptr_t car, uintptr_t mat, uintptr_t view, unsigned frame, unsigned zoom, float dt) {
     const Vec centre=read<Vec>(mat+0x30);
     const bool reset=state.vehicle!=car ||
-                     (frame-state.frame)>1 || length(centre-state.lastCentre)>20.f;
+                     (frame-state.frame)>1 || length(centre-state.shape.centre)>20.f;
     if(reset) {
         state={};
         state.vehicle=car;
         state.type=read<VehicleType>(car+0x594);
-        state.frame=frame;
         using ModelBounds=uintptr_t(__thiscall*)(uintptr_t);
         const auto model=reinterpret_cast<ModelBounds>(0x535300)(car);
         if(model) {
@@ -102,7 +102,7 @@ void updateInput(uintptr_t car, uintptr_t mat, unsigned frame, unsigned zoom, fl
         state.switchView=true;
         state.previousFov=exitBlend.fov;
         state.previousView=exitBlend.last;
-        state.previousCentre=state.lastCentre;
+        state.previousCentre=state.shape.centre;
         state.entryTime=0;
     } else if(!reset && frame==state.frame) {
         return;
@@ -110,7 +110,6 @@ void updateInput(uintptr_t car, uintptr_t mat, unsigned frame, unsigned zoom, fl
     state.zoom=zoom;
     state.profile=selected;
     state.usedRoof=roofOptions.enabled;
-    state.lastCentre=centre;
     state.frame=frame;
     state.shape.centre=centre;
     state.shape.up=read<Vec>(mat+0x20);
@@ -122,6 +121,13 @@ void updateInput(uintptr_t car, uintptr_t mat, unsigned frame, unsigned zoom, fl
     input.velocity=read<Vec>(car+0x44)*50.f;
     input.forward=state.shape.forward;
     input.viewFront=read<Vec>(cameraAddress+0x984);
+    if(zoom && read<uint16_t>(view+0xC)==18) {
+        // Mouse deltas belong to the active GTA chase camera. Its final render
+        // matrix may already include a scripted blend, shake or another draw.
+        const Vec raw=read<Vec>(view+0x190);
+        const float norm2=dot(raw,raw);
+        if(norm2>.98f && norm2<1.02f) input.viewFront=raw;
+    }
 
     const bool mouseHold=read<uint8_t>(0xB6EC2E) && (std::abs(read<float>(0xB73424))>0 ||
         std::abs(read<float>(0xB73428))>0);
@@ -138,7 +144,7 @@ void updateInput(uintptr_t car, uintptr_t mat, unsigned frame, unsigned zoom, fl
     input.handbrake=cameraHandbrake(type,(read<uint8_t>(car+0x428)&0x20u)!=0);
     input.nitro=nitroActive(car);
     input.contact=read<uintptr_t>(car+0xDC)!=0 && read<float>(car+0xD8)>0;
-    input.hittingWorld=read<uintptr_t>(car+0xDC)!=0 && read<float>(car+0xD8)>0 &&
+    input.hittingWorld=input.contact &&
                        std::abs(dot(read<Vec>(car+0xE0),input.forward))>.25f;
     float totalWeight=0;
     unsigned contacts=0;
@@ -186,12 +192,16 @@ void writePose(const Pose& pose,const Pose& native) {
     if(dot(read<Vec>(base),cross(native.front,native.up))<0) right=right*(-1);
     write(base,right); write(base+16,pose.front); write(base+32,pose.up); write(base+48,pose.position);
 }
-Vec localVector(Vec d,uintptr_t mat) {
-    return {dot(d,read<Vec>(mat)),dot(d,state.shape.forward),dot(d,state.shape.up)};
-}
-float clearance(Vec eye,Vec direction,uintptr_t mat,float margin) {
-    return state.hasBox ? bodyClearance(localVector(eye-state.shape.centre,mat),
-        localVector(direction,mat),state.boxMin,state.boxMax,margin) : 0.f;
+// Process_FollowCar_SA stores the look-at and the second history point
+// before CameraColDetAndReact changes the eye. Their separation is the
+// requested distance for this model and zoom, even when the stock eye hit a wall.
+ChaseFrame stockChase(uintptr_t view,const Vehicle& vehicle) {
+    const Vec focus=read<Vec>(view+0x148);
+    const float distance=length(read<Vec>(view+0x1E4)-focus);
+    const float maximum=read<float>(view+0xD0);
+    if(!(maximum>0 && maximum<=200 &&
+         length(focus-vehicle.centre)<std::max(5.f,vehicle.rearExtent+vehicle.roof+2.f))) return {};
+    return {focus,(distance>.25f && distance<=maximum+1.f) ? distance : maximum};
 }
 float applyCamera(float nativeFov) {
     unsigned mode{},zoom{};
@@ -233,22 +243,20 @@ float applyCamera(float nativeFov) {
         state={}; exitBlend={}; return nativeFov;
     }
     const bool roof=roofOptions.enabled;
-    const unsigned excluded=roof ? 2u : 3u;
-    if(zoom==excluded) {
-        const bool cycling=state.vehicle==car && state.usedRoof==roof && state.profile==selected;
-        if(roof)
-            zoom=cycling && state.zoom==1 ? 3u : 1u;
-        else
-            zoom=cycling && state.zoom==2 ? 0u : 2u;
+    if(roof && zoom==2) {
+        const bool cycling=state.vehicle==car && state.usedRoof && state.profile==selected;
+        zoom=cycling && state.zoom==1 ? 3u : 1u;
         write(cameraAddress+0xB4,zoom);
-        // GTA selects the bumper camera on its next update. Its current matrix
-        // still belongs to a chase camera.
-        if(!zoom)return nativeFov;
     }
-    updateInput(car,mat,frame,zoom,dt);
+    if(exitBlend.valid && state.vehicle==car && state.zoom==zoom && state.usedRoof==roof &&
+       state.profile==selected && exitBlend.frame==frame &&
+       length(native.position-exitBlend.last.position)<.0001f &&
+       dot(native.front,exitBlend.last.front)>.999999f) return exitBlend.fov;
+    updateInput(car,mat,view,frame,zoom,dt);
     const Response& effect=state.effect;
     if((zoom && effect.lag==0) || (!zoom && effect.targetHeight==0)) return nativeFov;
-    Placement desired=place(native,state.shape,effect,zoom==0,roofOptions);
+    const ChaseFrame chase=(mode==18 && zoom && !roof) ? stockChase(view,state.shape) : ChaseFrame{};
+    Placement desired=place(native,state.shape,effect,zoom==0,roofOptions,chase);
     if(!std::isfinite(dot(desired.anchor,desired.anchor)) || !std::isfinite(dot(desired.eye,desired.eye)) ||
        !std::isfinite(dot(desired.look,desired.look)) || !std::isfinite(dot(native.position,native.position)))
         return nativeFov;
@@ -258,11 +266,11 @@ float applyCamera(float nativeFov) {
     float startFov=nativeFov;
     if(state.switchView && blend<1) {
         start=state.previousView;
-        start.position=start.position+(state.lastCentre-state.previousCentre);
+        start.position=start.position+(state.shape.centre-state.previousCentre);
         startFov=state.previousFov;
     }
     const float fov=startFov+blend*(std::clamp((drawFov(selected,mode,zoom,nativeFov)+effect.nitroFov)*fovFactor,35.f,125.f)-startFov);
-    if(blend==0) return nativeFov;
+    if(blend==0 && !zoom) return nativeFov;
     const float reach=std::max(.25f,length(desired.look-desired.eye));
     const Vec desiredFront=(desired.look-desired.eye)*(1.f/reach);
     if(zoom) {
@@ -280,62 +288,22 @@ float applyCamera(float nativeFov) {
     const float nearZ=rwCam ? std::clamp(read<float>(rwCam+0x80),.10f,1.f) : .3f;
     const float halfW=rwCam ? std::clamp(read<float>(rwCam+0x68),.1f,3.f) : 1.f;
     const float halfH=rwCam ? std::clamp(read<float>(rwCam+0x6c),.1f,3.f) : .75f;
-    const float margin=nearZ*std::sqrt(1+halfW*halfW+halfH*halfH)+.12f;
-    if(zoom==3 && !roofOptions.enabled) {
-        const Vec pivot=desired.anchor;
-        auto floorAt=[&](Vec at,float& height) {
-            // Probe only the road band. Ignore the vehicle through the same
-            // camera collision filter used for the boom and near-plane sweeps.
-            if(at.z>pivot.z+1.f)return false;
-            Vec start{at.x,at.y,std::max(pivot.z+1.f,at.z+margin)};
-            Vec end{at.x,at.y,at.z-margin};
-            ColPoint hit{};
-            if(!traceGeometry(start,end,hit) || hit.normal.z<.55f)return false;
-            height=hit.position.z;
+    Pose pose;
+    if(zoom) {
+        const ChaseBody body{state.shape.centre,read<Vec>(mat),state.shape.forward,state.shape.up,
+                             state.boxMin,state.boxMax,state.hasBox};
+        auto cast=[](Vec from,Vec to,ChaseHit& hit) {
+            ColPoint result{};
+            if(!traceGeometry(from,to,result)) return false;
+            hit={result.position,result.normal};
             return true;
         };
-        const Vec safe=farEyeAboveRoad(pivot,desired.eye,state.shape.forward*(-1.f),
-                                   std::max(-effect.lag,state.shape.rearExtent+margin),margin,floorAt);
-        desired.eye=desired.eye+(safe-desired.eye)*blend;
-    }
-    if(zoom) {
-        const Vec radius=desired.eye-desired.anchor;
-        const float distance=length(radius);
-        if(distance>.01f) {
-            const Vec outward=radius*(1.f/distance);
-            const Vec correction=outward*clearance(desired.eye,outward,mat,margin);
-            desired.eye=desired.eye+correction;
-            if(desired.keepBearing) desired.look=desired.look+correction;
-        }
-    }
-    Vec eye=limitTravel(desired.anchor,desired.eye,zoom ? .24f : .12f,hitGeometry);
-    if(zoom) {
-        const auto pose=orient(desired,eye);
-        eye=clipNearPlane(desired.anchor,pose,nearZ,halfW,halfH,hitGeometry);
-        if(roofOptions.enabled && length(eye-native.position)>.05f)
-            eye=limitTravel(native.position,eye,.20f,hitGeometry);
-    }
-    if(zoom && clearance(eye,desired.look-eye,mat,margin)>0) {
-        const Vec along=desired.eye-desired.anchor;
-        const float requestedSetback=std::hypot(along.x,along.y);
-        auto accessible=[&](Vec candidate,Vec& result) {
-            Vec checked=limitTravel(desired.anchor,candidate,.20f,hitGeometry);
-            checked=clipNearPlane(desired.anchor,orient(desired,checked),nearZ,halfW,halfH,hitGeometry);
-            const Vec d=checked-desired.anchor;
-            if(std::hypot(d.x,d.y)<.55f*requestedSetback ||
-               clearance(checked,state.shape.up,mat,margin)>0) return false;
-            result=checked;
-            return true;
-        };
-        const bool found=liftLowEye(desired.anchor,desired.eye,std::max(1.f,-effect.lag*.5f),accessible,eye);
-        if(!found && !desired.keepBearing) {
-            // The wall limits eye travel. Keep the requested bearing even if
-            // this places the eye inside the car or at the look target.
-            desired.look=eye+(desired.look-desired.eye);
-        }
+        pose=resolveChase(desired,body,{nearZ,halfW,halfH},state.travel,dt,cast);
+    } else {
+        state.travel={};
+        pose=orient(desired,limitTravel(desired.anchor,desired.eye,.12f,hitGeometry));
     }
     write(ignoreEntity,previous);
-    const auto pose=orient(desired,eye);
     writePose(pose,native);
     exitBlend={pose,fov,0,frame,true};
     return fov;
@@ -457,7 +425,7 @@ void installGame() {
     replaceBranch(0x53EBB1,0xE8,nextFonts,fonts);
 }
 extern "C" __declspec(dllexport) float __cdecl WhooshGetHudScale() {
-    return enableHudShake && selected==Profile::Carbon && state.vehicle && state.frame==read<unsigned>(gameFrame) && gameplay()
+    return enableHudShake && selected==Profile::Carbon && active() && gameplay()
         ? state.effect.hudScale : 1.f;
 }
 }

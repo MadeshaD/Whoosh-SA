@@ -291,7 +291,7 @@ Response Controller::step(const Input& in) {
     return out;
 }
 
-Placement place(const Pose& native, const Vehicle& car, const Response& r, bool bumper, RoofOptions roof) {
+Placement place(const Pose& native, const Vehicle& car, const Response& r, bool bumper, RoofOptions roof, ChaseFrame chase) {
     const Vec stockFront=normalized(native.front,{0,1,0});
     const Vec front=bumper ? stockFront : normalized(r.viewFront,stockFront);
     const Vec up=bumper ? normalized(native.up,{0,0,1}) : Vec{0,0,1};
@@ -314,6 +314,10 @@ Placement place(const Pose& native, const Vehicle& car, const Response& r, bool 
             const float pitch=std::clamp(pitchOf(aim)+roof.pitchDegrees*radians,-89.f*radians,89.f*radians);
             p.look=p.eye+fromAngles(yawOf(aim),pitch)*length(sight);
         }
+    } else if(chase.distance>0) {
+        p.anchor=chase.focus;
+        p.eye=p.anchor-front*(chase.distance-r.eye);
+        p.look=p.anchor+car.forward*r.target+car.up*r.targetHeight;
     } else {
         // The stock camera already accounts for the model, zoom and obstructions.
         // Rotate the entire stock offset around the vehicle, including its off-axis component.

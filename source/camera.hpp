@@ -88,24 +88,11 @@ inline float bodyClearance(Vec local,Vec direction,Vec lo,Vec hi,float margin) {
        !slab(local.z,direction.z,lo.z,hi.z) || exit==1e6f) return 0;
     return exit+.02f;
 }
-// Lift a blocked low chase view on its current bearing, retaining its
-// horizontal setback so a ground contact cannot produce a roof camera.
-template<class Accept> bool liftLowEye(Vec pivot,Vec requested,float minimumSetback,Accept accept,Vec& result) {
-    const Vec offset=requested-pivot;
-    const float horizontal=std::hypot(offset.x,offset.y);
-    if(horizontal<.05f) return false;
-    const float setback=std::max(horizontal,minimumSetback);
-    Vec candidate=pivot+Vec{offset.x,offset.y,0}*(setback/horizontal);
-    const float first=std::max(offset.z,-.5f*setback);
-    for(unsigned i=0;i<=12;++i) {
-        candidate.z=pivot.z+first+.10f*setback*i;
-        if(accept(candidate,result)) return true;
-    }
-    return false;
-}
 struct Placement { Vec anchor{}, eye{}, look{}, up{}; bool keepBearing{}; };
 struct RoofOptions { bool enabled{}; float height{}, distance{}, pitchDegrees{}; };
-Placement place(const Pose& native, const Vehicle& car, const Response& response, bool bumper, RoofOptions roof={});
+struct ChaseFrame { Vec focus{}; float distance{}; };
+Placement place(const Pose& native, const Vehicle& car, const Response& response, bool bumper,
+                RoofOptions roof={}, ChaseFrame chase={});
 Pose orient(const Placement& p, Vec clippedEye);
 Vec cross(Vec a, Vec b);
 template<class Cast> Vec limitTravel(Vec from, Vec to, float clearance, Cast cast) {
@@ -117,51 +104,6 @@ template<class Cast> Vec limitTravel(Vec from, Vec to, float clearance, Cast cas
     if(!cast(from,to+along*clearance,hit)) return to;
     const float stop=std::clamp(dot(hit-from,along)-clearance,0.f,distance);
     return from+along*stop;
-}
-// Sweep the near-plane corners along the boom. A parallel sweep lets us
-// subtract clearance in world units even when the plane grazes a side wall.
-template<class Cast> Vec clipNearPlane(Vec pivot,const Pose& view,float nearZ,
-                                      float halfW,float halfH,Cast cast) {
-    const Vec delta=view.position-pivot;
-    const float distance=length(delta);
-    if(distance<.01f) return view.position;
-    const Vec along=delta*(1.f/distance);
-    const Vec right=cross(view.front,view.up);
-    float stop=distance;
-    for(float x:{-1.f,1.f}) for(float y:{-1.f,1.f}) {
-        const Vec corner=(view.front+right*(x*halfW)+view.up*(y*halfH))*nearZ;
-        const Vec start=pivot+corner;
-        Vec hit{};
-        if(cast(start,view.position+corner+along*.12f,hit))
-            stop=std::min(stop,std::max(0.f,dot(hit-start,along)-.12f));
-    }
-    return pivot+along*stop;
-}
-// Keep the eye on its orbit when its near plane reaches the road. Shortening
-// the boom toward its pivot here would pull the far camera into the vehicle.
-template<class Floor> Vec farEyeAboveRoad(Vec pivot,Vec requested,Vec rearward,
-                                         float minimumRadius,float margin,Floor floorAt) {
-    Vec delta=requested-pivot;
-    const float distance=length(delta);
-    const float radius=std::max(distance,minimumRadius);
-    const float horizontal=std::hypot(delta.x,delta.y);
-    Vec bearing=horizontal>.01f ? Vec{delta.x/horizontal,delta.y/horizontal,0} : rearward;
-    const float span=std::hypot(bearing.x,bearing.y);
-    if(span<.01f || radius<=.01f)return requested;
-    bearing={bearing.x/span,bearing.y/span,0};
-    float height=distance>.01f ? delta.z*radius/distance : 0.f;
-    auto onOrbit=[&] {
-        return pivot+bearing*std::sqrt(std::max(0.f,radius*radius-height*height))+Vec{0,0,height};
-    };
-    Vec eye=onOrbit();
-    // Re-sample after shifting horizontally, e.g. on a sloping road.
-    for(int i=0;i<3;++i) {
-        float ground{};
-        if(!floorAt(eye,ground) || eye.z>=ground+margin-.001f)break;
-        height=std::clamp(ground+margin-pivot.z,-radius,radius);
-        eye=onOrbit();
-    }
-    return eye;
 }
 struct HudVertex { float x,y,z,rhw; uint32_t color; float u,v; };
 static_assert(sizeof(HudVertex)==28);
