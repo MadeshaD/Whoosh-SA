@@ -179,6 +179,107 @@ void chaseCollision() {
     }
     assert(near(radius,6.f,.012f));
 }
+// A short wall separates the previous orbit from a clear requested view.
+void releaseAtWallEnd() {
+    for(float side:{-1.f,1.f}) for(float speed:{0.f,8.f}) for(int fps:{30,60,144}) {
+        const float dt=1.f/fps;
+        ChaseBody body{{},{1,0,0},{0,1,0},{0,0,1},{-1,-2,-.6f},{1,2,.6f},true};
+        ChaseTravel arm;
+        for(int frame=0;frame<fps;++frame) {
+            const Vec pivot{0,frame*dt*speed,.15f};
+            body.centre=pivot;
+            // Start with a rear wall. On the next frame the driver looks
+            // around the end of a second wall towards an open side street.
+            auto walls=[&](Vec a,Vec b,ChaseHit& hit) {
+                if(!frame && b.y < -5 && a.y >= -5) {
+                    hit={a+(b-a)*((-5-a.y)/(b.y-a.y)),{0,1,0}};
+                    return true;
+                }
+                const float x=side*.14f;
+                if((a.x-x)*(b.x-x)>=0) return false;
+                const Vec point=a+(b-a)*((x-a.x)/(b.x-a.x));
+                if(point.y>-.25f) return false;
+                hit={point,{-side,0,0}};
+                return true;
+            };
+            const Vec direction=frame ? Vec{side,0,0} : Vec{0,-1,0};
+            Placement view{pivot,pivot+direction*8,pivot,{0,0,1}};
+            const Pose result=resolveChase(view,body,{.1f,.5f,.4f},arm,dt,walls);
+            if(!frame) assert(arm.valid && arm.radius<7.9f);
+            if(frame==fps-1) assert(dot(result.position-pivot,direction)>7.5f);
+        }
+    }
+}
+// Sweep a far camera across a recessed wall, reversing the mouse at each end.
+void recessedWall() {
+    for(int fps:{25,60,144}) {
+        ChaseTravel travel;
+        auto wall=[](Vec a,Vec b,ChaseHit& hit) {
+            float first=2.f;
+            auto face=[&](float start,float delta,float plane,Vec normal,auto within) {
+                if(std::abs(delta)<.00001f) return;
+                const float t=(plane-start)/delta;
+                if(t<=0 || t>1 || t>=first) return;
+                const Vec q=a+(b-a)*t;
+                if(within(q)) { first=t; hit={q,normal}; }
+            };
+            face(a.y,b.y-a.y,-2,{0,1,0},[](Vec q){return std::abs(q.x)>=1.3f;});
+            face(a.y,b.y-a.y,-4,{0,1,0},[](Vec q){return std::abs(q.x)<=1.3f;});
+            for(float side:{-1.f,1.f})
+                face(a.x,b.x-a.x,side*1.3f,{-side,0,0},[](Vec q){return q.y<=-2 && q.y>=-4;});
+            return first<=1;
+        };
+        Vec prev{};
+        for(int i=0;i<fps*4;++i) {
+            const float yaw=.9f*std::cos(3.14159265f*i/(2*fps));
+            const Vec pivot{0,0,1},dir{std::sin(yaw),-std::cos(yaw),0};
+            const Placement view{pivot,pivot+dir*8,pivot,{0,0,1}};
+            const auto pose=resolveChase(view,{}, {.25f,.8f,.5f},travel,1.f/fps,wall);
+            const Vec d=pose.position-pivot;
+            assert(std::abs(std::atan2(d.x,-d.y)-yaw)<.01f);
+            assert(dot(pose.front,dir)<-.999f);
+            if(i) assert(length(pose.position-prev)<18.f/fps);
+            if(i==fps || i==fps*3) assert(-d.y>3.4f);
+            prev=pose.position;
+        }
+    }
+}
+// Approach the wall slowly with fixed mouse input, then reverse out.
+void approachWall() {
+    for(bool ceiling:{false,true}) for(int fps:{25,60,144}) {
+        ChaseTravel travel;
+        const ChaseLens lens{.25f,.8f,.5f};
+        ChaseBody body{{},{1,0,0},{0,1,0},{0,0,1},{-1,-2,-.5f},{1,2,.7f},true};
+        auto cast=[&](Vec a,Vec b,ChaseHit& hit) {
+            float first=2.f;
+            auto plane=[&](float start,float delta,float value,Vec normal) {
+                if(std::abs(delta)<.000001f) return;
+                const float t=(value-start)/delta;
+                if(t<=0 || t>1 || t>=first) return;
+                first=t; hit={a+(b-a)*t,normal};
+            };
+            plane(a.y,b.y-a.y,-3,{0,1,0});
+            if(ceiling) plane(a.z,b.z-a.z,.78f,{0,0,-1});
+            return first<=1;
+        };
+        Vec previous{};
+        for(int frame=0;frame<=19*fps;++frame) {
+            const float t=float(frame)/fps;
+            body.centre={0,5.5f-std::min({t,8.f,19.f-t}),0};
+            const Vec pivot=body.centre;
+            const Placement view{pivot,pivot+Vec{0,-8,0},pivot,{0,0,1}};
+            const Pose pose=resolveChase(view,body,lens,travel,1.f/fps,cast);
+            if(frame) assert(length(pose.position-previous)<15.f/fps);
+            assert(pose.position.y>-3.f);
+            if(t>9 && t<11) {
+                const Vec local=pose.position-pivot;
+                assert(ceiling ? std::abs(local.x)>1.f : local.z>.7f);
+            }
+            if(t==19) assert(length(pose.position-view.eye)<.2f);
+            previous=pose.position;
+        }
+    }
+}
 void impulse(int fps) {
     auto i=drive(Profile::Carbon,2,fps,8);
     Controller c; c.step(i);
@@ -305,7 +406,7 @@ int main() {
     assert(cameraHandbrake(T::Automobile,true) && !cameraHandbrake(T::Automobile,false));
     assert(!cameraHandbrake(T::Helicopter,true) && !hasCarWheels(T::Bicycle));
 
-    chaseCollision(); checkModes(); levelOrbit(); roadNoise(); orbitAndHud();
+    approachWall(); recessedWall(); releaseAtWallEnd(); chaseCollision(); checkModes(); levelOrbit(); roadNoise(); orbitAndHud();
     for(int fps:{25,30,60,144}) {returnDuringTurn(fps); returnSettings(fps); parkingAndLightContact(fps); regulation(fps); impulse(fps); autoFollowAndMouse(fps);}
     std::puts("Four views, two driving profiles, stock bypass, braking, impact envelope, road noise, orbit, clipping and HUD verified.");
 }
