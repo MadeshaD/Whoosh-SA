@@ -130,7 +130,9 @@ Pose resolveChase(Placement desired,const ChaseBody& body,ChaseLens lens,
     if(extra>0 && radius+extra>available) {
         const Vec side=cross(requestedOrientation.front,requestedOrientation.up);
         const Vec up{0,0,1};
-        float best=1.e6f;
+        struct Candidate { Vec delta; float cost; };
+        std::array<Candidate,7> candidates;
+        unsigned count=0;
         for(Vec direction:{up,side,side*(-1.f),up+side,up-side,
                            body.forward,body.forward*(-1.f)}) {
             const float magnitude=length(direction);
@@ -139,7 +141,20 @@ Pose resolveChase(Placement desired,const ChaseBody& body,ChaseLens lens,
             const float step=bodyExit(eye,direction)+.10f;
             const Vec delta=direction*step;
             const float cost=step+.5f*length(delta-travel.relief);
-            if(cost>=best) continue;
+            candidates[count++]={delta,cost};
+        }
+        // Seven entries at most. Keep the original tie order without allocating.
+        for(unsigned i=1;i<count;++i) {
+            const Candidate value=candidates[i];
+            unsigned j=i;
+            while(j && value.cost<candidates[j-1].cost) {
+                candidates[j]=candidates[j-1];
+                --j;
+            }
+            candidates[j]=value;
+        }
+        for(unsigned i=0;i<count;++i) {
+            const Vec delta=candidates[i].delta;
             const Vec end=eye+delta;
             if(dot(end-pivot,outward)<0 || cast(pivot,end,hit) || cast(eye,end,hit)) continue;
             bool clear=true;
@@ -149,7 +164,7 @@ Pose resolveChase(Placement desired,const ChaseBody& body,ChaseLens lens,
                     break;
                 }
             }
-            if(clear) { best=cost; targetRelief=delta; }
+            if(clear) { targetRelief=delta; break; }
         }
     }
     Vec relief=travel.relief+(targetRelief-travel.relief)*(-std::expm1(-7.f*dt));

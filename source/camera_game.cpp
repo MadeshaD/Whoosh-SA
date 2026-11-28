@@ -47,9 +47,9 @@ struct ExitBlend {
     bool valid{};
 };
 ExitBlend exitBlend;
-using SetFov=void(__cdecl*)(float);
+
 using Draw=void(__cdecl*)();
-SetFov nextFov=reinterpret_cast<SetFov>(0x6FF410);
+
 Draw nextHud=reinterpret_cast<Draw>(0x53E230), nextAfter=reinterpret_cast<Draw>(0x58D490), nextFonts=reinterpret_cast<Draw>(0x71A210);
 
 
@@ -308,9 +308,32 @@ float applyCamera(float nativeFov) {
     exitBlend={pose,fov,0,frame,true};
     return fov;
 }
-void __cdecl cameraFov(float native) {
-    nextFov(applyCamera(native));
+// Prepare the FOV argument before the game's dispatch. Other camera mods
+// can own the following call regardless of ASI load order.
+extern "C" float __cdecl whooshPrepareFov(float value) { return applyCamera(value); }
+#if defined(_MSC_VER)
+__declspec(naked) void prepareCamera() {
+    __asm {
+        push dword ptr [esp]
+        pushfd
+        pushad
+        push dword ptr [esp+84h]
+        call whooshPrepareFov
+        add esp,4
+        fstp dword ptr [esp+28h]
+        popad
+        popfd
+        mov edx,[esp+4]
+        ret
+    }
 }
+#else
+__attribute__((naked)) void prepareCamera() {
+    __asm__("pushl (%esp)\n pushfl\n pushal\n pushl 0x84(%esp)\n"
+            "call _whooshPrepareFov\n addl $4,%esp\n fstps 0x28(%esp)\n"
+            "popal\n popfl\n movl 4(%esp),%edx\n ret");
+}
+#endif
 
 // The game HUD and its deferred text use RenderWare screen-space vertices.
 // Transform only those two draws. Keep UVs, depth, color and caller storage intact.
@@ -418,8 +441,19 @@ void select(Profile p,float factor,VehicleOptions options,float timeout,float sp
 }
 bool active() {return state.vehicle && state.frame==read<unsigned>(gameFrame);}
 void installGame() {
-    if(read<uint8_t>(0x52C975)!=0x52 || read<uint32_t>(0x52C97B)!=0x6A04C483u ||
-       !replaceBranch(0x52C976,0xE8,nextFov,cameraFov)) return;
+    constexpr uintptr_t argument=0x52C971;
+    const uint8_t original[]={0x8b,0x54,0x24,0x58,0x52};
+    if(!std::memcmp(reinterpret_cast<const void*>(argument),original,sizeof(original))) {
+        DWORD old;
+        auto* code=reinterpret_cast<void*>(argument);
+        if(VirtualProtect(code,sizeof(original),PAGE_EXECUTE_READWRITE,&old)) {
+            write(argument+1,uint32_t(reinterpret_cast<uintptr_t>(&prepareCamera)-argument-5));
+            write(argument,uint8_t(0xe8));
+            FlushInstructionCache(GetCurrentProcess(),code,sizeof(original));
+            DWORD unused;
+            VirtualProtect(code,sizeof(original),old,&unused);
+        }
+    }
     replaceBranch(0x53EB12,0xE8,nextHud,hud);
     replaceBranch(0x53EBA2,0xE8,nextAfter,afterFade);
     replaceBranch(0x53EBB1,0xE8,nextFonts,fonts);

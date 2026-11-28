@@ -112,25 +112,26 @@ void motionBlur(float strength,uintptr_t car) {
     if(restoreAlpha)call<int>(set,29,8);
     auto draw=read<uintptr_t>(rw+0x34);
     static constexpr auto indices=meshIndices();
-    std::array<ScreenVertex,(cols+1)*(rows+1)> vertices{};
+    static std::array<ScreenVertex,(cols+1)*(rows+1)> vertices{};
+    static int meshWidth{},meshHeight{};
+    if(w!=meshWidth || h!=meshHeight) {
+        meshWidth=w;
+        meshHeight=h;
+        for(int y=0;y<=rows;++y)for(int x=0;x<=cols;++x) {
+            const float px=float(x)/cols*w-.5f,py=float(y)/rows*h-.5f;
+            vertices[y*(cols+1)+x]={px,py,0,1,0,(px+.5f)/w,(py+.5f)/h};
+        }
+    }
+    const float mix=useCarbon ? unitRange(4.f*normalizedSpeed*settings.strength) : unitRange(3.f*strength);
     for(int y=0;y<=rows;++y)for(int x=0;x<=cols;++x) {
-        UV p{float(x)/cols,float(y)/rows};
         float mask=1;
         if(radius.x>.001f && radius.y>.001f) {
-            float dx=(p.x-mid.x)/radius.x,dy=(p.y-mid.y)/radius.y;
+            float dx=(float(x)/cols-mid.x)/radius.x,dy=(float(y)/rows-mid.y)/radius.y;
             mask=smooth((std::sqrt(dx*dx+dy*dy)-.72f)/.55f);
         }
-        vertices[y*(cols+1)+x]={p.x*w-.5f,p.y*h-.5f,0,1,
-            (uint32_t(255*mask)<<24)|0xffffff,0,0};
+        vertices[y*(cols+1)+x].color=(unsigned(unsigned(255*mask)*mix)<<24)|0xffffff;
     }
-    // Composite one filtered scene under the HUD, feathering the protected vehicle.
     call<int>(set,1,filtered);
-    const float mix=useCarbon ? unitRange(4.f*normalizedSpeed*settings.strength) : unitRange(3.f*strength);
-    for(auto& v:vertices) {
-        v.u=(v.x+.5f)/w;
-        v.v=(v.y+.5f)/h;
-        v.color=(unsigned((v.color>>24)*mix)<<24)|0xffffff;
-    }
     if(call<int>(draw,3,vertices.data(),int(vertices.size()),indices.data(),int(indices.size()))) {
         ++blurFrames;
         blurStage="composite submitted";
@@ -142,6 +143,8 @@ void motionBlur(float strength,uintptr_t car) {
         float nearZ=read<float>(camera+0x80),farZ=read<float>(camera+0x84);
         if(nearZ>0 && farZ>nearZ) {
             call<int>(set,6,1);
+            ScreenVertex layers[12*6];
+            unsigned count=0;
             for(int band=0;band<12;++band) {
                 float metres=10.f+(band+.5f)*(340.f/12);
                 if(metres>=farZ)break;
@@ -149,8 +152,9 @@ void motionBlur(float strength,uintptr_t car) {
                 uint32_t color=(uint32_t(std::lround(255.f*.30f/(12.f-.30f*band)))<<24)|0xffffff;
                 ScreenVertex q[4]={{-.5f,-.5f,z,1,color,0,0},{w-.5f,-.5f,z,1,color,float(w)/bw,0},
                     {-.5f,h-.5f,z,1,color,0,float(h)/bh},{w-.5f,h-.5f,z,1,color,float(w)/bw,float(h)/bh}};
-                call<int>(read<uintptr_t>(rw+0x30),4,q,4);
+                for(unsigned corner:{0u,1u,2u,2u,1u,3u}) layers[count++]=q[corner];
             }
+            if(count) call<int>(read<uintptr_t>(rw+0x30),3,layers,count);
         }
     }
     if(useCarbon) {

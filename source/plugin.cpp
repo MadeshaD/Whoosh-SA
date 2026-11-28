@@ -180,7 +180,7 @@ void reload() {
         static bool started=false;
         if(FILE* file=_wfopen((directory+L"\\Whoosh.SA.log").c_str(),started?L"ab":L"wb")) {
             started=true;
-            std::fprintf(file,"Whoosh.SA 0.43 settings: Enabled=%d ReloadKey=%d CameraProfile=%d HUDShake=%d MotionBlur=%d Strength=%.0f WindTrails=%d Opacity=%.0f NitroLights=%d StreakFlares=%d WindAudio=%d Volume=%.0f PassDistance=%.1f RoofHeight=%.1f\n",
+            std::fprintf(file,"Whoosh.SA 0.44 settings: Enabled=%d ReloadKey=%d CameraProfile=%d HUDShake=%d MotionBlur=%d Strength=%.0f WindTrails=%d Opacity=%.0f NitroLights=%d StreakFlares=%d WindAudio=%d Volume=%.0f PassDistance=%.1f RoofHeight=%.1f\n",
                 enabled,reloadKey,profile,hudShake,fx.blur,fx.strength*100,fx.wind,fx.windOpacity*100,fx.lights,fx.flares,windEnabled,settingGain*100,cfg.passMetres,cfg.roofMetres);
             std::fclose(file);
         }
@@ -287,8 +287,7 @@ void install(HMODULE self) {
     constexpr uintptr_t site=0x53e98b;
     if(!equals(site-5,"\xb9\x90\xbc\xb6\x00\xe8",6) ||
        !equals(site+5,"\x8b\x15\x38\x70\xc1\x00",6) ||
-       !equals(0x56e0d0,"\x8b\x44\x24\x04\x85\xc0",6) ||
-       !equals(0x56ba00,"\x83\xec\x60\x66\x81\x3d\x78\xcd\xb7\x00",10)) return;
+       !equals(0x52c90b,"\x85\xc0\x74\x52\x55\x6a\xff",7)) return;
     DWORD old;
     if(!VirtualProtect(reinterpret_cast<void*>(site+1),4,PAGE_EXECUTE_READWRITE,&old))return;
     HMODULE pinned{};
