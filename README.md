@@ -1,4 +1,4 @@
-<img width="1920" height="466" alt="Whoosh Logo" src="https://github.com/user-attachments/assets/ed915972-c9bf-458d-81d8-f5592eda5f87" />
+<img width="1920" alt="Whoosh Logo" src="https://github.com/user-attachments/assets/ed915972-c9bf-458d-81d8-f5592eda5f87" />
 
 # Whoosh — Need for Speed-style effects
 **Whoosh** adds several sound and visual effects inspired by NFS Most Wanted and Carbon to GTA San Andreas.
